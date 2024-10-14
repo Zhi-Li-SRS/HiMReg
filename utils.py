@@ -1,0 +1,310 @@
+from collections import deque
+from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class ConvergenceMonitor:
+    def __init__(self, N, slope):
+        """
+        Initialize the ConvergenceMonitor class.
+        Args:
+        - N: number of values to keep track of.
+        """
+        self.N = N
+        self.losses = deque(maxlen=N)
+        self.slope = slope
+
+    def update(self, loss):
+        """Append a new loss value to the monitor."""
+        self.losses.append(loss)
+
+    def _compute_slope(self):
+        """Compute the slope of the best-fit line using simple linear regression."""
+        if len(self.losses) < 2:
+            return 0
+
+        x = np.arange(len(self.losses))
+        y = np.array(self.losses)
+
+        # Compute the slope (m) of the best-fit line y = mx + c
+        # m = (NΣxy - ΣxΣy) / (NΣx^2 - (Σx)^2)
+        xy_sum = np.dot(x, y)
+        x_sum = x.sum()
+        y_sum = y.sum()
+        x_squared_sum = (x**2).sum()
+        N = len(self.losses)
+
+        numerator = N * xy_sum - x_sum * y_sum
+        denominator = N * x_squared_sum - x_sum**2
+        if denominator == 0:
+            return 0
+        slope = numerator / denominator
+        return slope
+
+    def converged(self, loss=None):
+        """Check if the loss has increased (i.e., slope > threshold).
+        optionally, update the monitor with a new loss value.
+        """
+        if loss is not None:
+            self.update(loss)
+        if len(self.losses) < self.N:
+            return False
+        else:
+            slope = self._compute_slope()
+            return slope > self.slope
+
+    def reset(self):
+        """Reset the monitor."""
+        self.losses.clear()
+
+
+def gaussian_1d(sigma: torch.Tensor, truncated=4.0, approx="erf", normalize=True):
+    """
+    Compute 1D Gaussian kernel.
+
+    Args:
+        sigma: Standard deviation of the Gaussian kernel.
+        truncated: Truncate the Gaussian kernel at this many standard deviations.
+        approx: Approximation method. Either "erf" or "exp".
+        normalize: Normalize the Gaussian kernel.
+
+    returns:
+        1D Gaussian kernel: torch.Tensor.
+    """
+    device = sigma.device
+    sigma = torch.as_tensor(
+        sigma,
+        dtype=torch.float,
+        device=device if isinstance(sigma, torch.Tensor) else None,
+    )
+    if truncated < 0.0:
+        raise ValueError("truncated must be positve")
+    tail = int(max(float(sigma) * truncated, 0.5) + 0.5)
+    if approx.lower() == "erf":
+        x = torch.arange(-tail, tail + 1, dtype=torch.float, device=device)
+        t = 0.70710678 / torch.abs(sigma)
+        out = 0.5 * ((t * (x + 0.5)).erf() - (t * (x - 0.5)).erf())
+        out = out.clamp(min=0)
+    elif approx.lower() == "sampled":
+        x = torch.arange(-tail, tail + 1, dtype=torch.float, device=device)
+        out = torch.exp(-0.5 / (sigma**2) * x**2)
+        if not normalize:
+            out = out / (2.5066282 * sigma)
+    else:
+        raise ValueError(f"Unknown approximation method: {approx}")
+
+    return out / out.sum() if normalize else out
+
+
+def make_regtangular_kernel(kernel_size):
+    """Create a rectangular kernel of size kernel_size."""
+    return torch.ones(kernel_size)
+
+
+def make_triangular_kernel(kernel_size):
+    """Create a triangular kernel of size kernel_size."""
+
+    size = (kernel_size + 1) // 2
+    if size % 2 == 0:
+        size -= 1
+    f = torch.ones((1, 1, size), dtype=torch.float).div(size)
+    padding = (kernel_size - size) // 2 + size // 2
+    return F.conv1d(f, f, padding=padding).reshape(-1)
+
+
+def make_gaussian_kernel(kernel_size, sigma):
+    """Create a Gaussian kernel of size kernel_size."""
+    sigma = torch.tensor(kernel_size / 3.0)
+    kernel = gaussian_1d(sigma, truncated=4.0, approx="erf", normalize=True) * (
+        2.5066282 * sigma
+    )
+
+    return kernel[:kernel_size]
+
+
+kernel_dict = {
+    "rectangular": make_regtangular_kernel,
+    "triangular": make_triangular_kernel,
+    "gaussian": make_gaussian_kernel,
+}
+
+
+def seperate_filter(x, kernels, mode=None):
+    """Seperate the filter into two 1D filters."""
+    if not isinstance(x, torch.Tensor):
+        raise ValueError("x must be a torch.Tensor")
+
+    spatial_dims = x.dim() - 2
+    if isinstance(kernels, torch.Tensor):
+        kernels = [kernels] * spatial_dims
+
+    _kernels = [s.to(x) for s in kernels]  # Convert to tensor
+    paddings = [(k.shape[0] - 1) // 2 for k in _kernels]
+    c = x.shape[1]
+    pad_mode = "constant" if mode is None else mode
+
+    for d in range(spatial_dims):
+        s = [1] * len(x.shape)
+        s[d + 2] = -1
+        _kernel = _kernels[d].reshape(s)
+        if _kernel.numel() == 1 and _kernel[0] == 1:
+            continue
+
+        _kernel = _kernel.repeat([c, 1] + [1] * spatial_dims)
+        padding = [0] * spatial_dims
+        padding[d] = paddings[d]
+        reversed_padding = padding[::-1]
+        reversed_padding_repeated_twice = [[p, p] for p in reversed_padding]
+        sum_reversed_padding_repeated_twice = []
+        for p in reversed_padding_repeated_twice:
+            sum_reversed_padding_repeated_twice.extend(p)
+
+        padded_input = F.pad(x, sum_reversed_padding_repeated_twice, mode=pad_mode)
+        if spatial_dims == 1:
+            x = F.conv1d(input=padded_input, weight=_kernel, groups=c)
+        elif spatial_dims == 2:
+            x = F.conv2d(input=padded_input, weight=_kernel, groups=c)
+        elif spatial_dims == 3:
+            x = F.conv3d(input=padded_input, weight=_kernel, groups=c)
+        else:
+            raise NotImplementedError(f"Unsupported spatial_dims: {spatial_dims}.")
+    return x
+
+
+def downsample(
+    image,
+    size: List[int],
+    mode: str,
+    sigma: Optional[torch.Tensor] = None,
+    gaussians: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    this function is to downsample the image to the given size
+    but first, we need to perform smoothing
+    if sigma is provided, then use this sigma for downsampling, otherwise infer sigma
+    """
+    if gaussians is None:
+        if sigma is None:
+            orig_size = list(image.shape[2:])
+            sigma = [
+                0.5 * orig_size[i] / size[i] for i in range(len(orig_size))
+            ]  # use sigma as the downsampling factor
+        if isinstance(sigma, torch.Tensor):
+            sigma = sigma.clone().detach().to(dtype=torch.float32, device=image.device)
+        else:
+            sigma = torch.tensor(sigma, dtype=torch.float32, device=image.device)
+        # create gaussian convs
+        gaussians = [gaussian_1d(s, truncated=2) for s in sigma]
+    # otherwise gaussians is given, just downsample
+    image_smooth = seperate_filter(image, gaussians)
+    image_down = F.interpolate(image_smooth, size=size, mode=mode, align_corners=True)
+    return image_down
+
+
+def scaling_and_squaring(u, grid, n=6):
+    """
+    Apply scaling and squaring to a displacement field
+
+    :param u: Input stationary velocity field, PyTorch tensor of shape [B, D, H, W, 3] or [B, H, W, 2]
+    :param grid: Sampling grid of size [B, D, H, W, dims]  or [B, H, W, dims]
+    :param n: Number of iterations of scaling and squaring (default: 6)
+
+    :returns: Output displacement field, v, PyTorch tensor of shape [B, D, H, W, dims] or [B, H, W, dims]
+    """
+    dims = u.shape[-1]
+    v = (1.0 / 2**n) * u
+    if dims == 3:
+        for i in range(n):
+            vimg = v.permute(0, 4, 1, 2, 3)  # [1, 3, D, H, W]
+            v = v + F.grid_sample(vimg, v + grid, align_corners=True).permute(
+                0, 2, 3, 4, 1
+            )
+    elif dims == 2:
+        for i in range(n):
+            vimg = v.permute(0, 3, 1, 2)
+            v = v + F.grid_sample(vimg, v + grid, align_corners=True).permute(0, 2, 3, 1)
+    else:
+        raise ValueError("Invalid dimension: {}".format(dims))
+    return v
+
+
+def integer_to_onehot(image: torch.Tensor, background_label: int = 0, max_label=None):
+    """
+    Convert integer labels to one-hot vectors.
+
+    Args:
+        image: Integer labels.
+        background_label: Label value to be considered as background, and this is the label we need to ignore.
+        max_label: Maximum value of the label.
+
+    Returns:
+        One-hot representation of the input image.
+    """
+    if max_label is None:
+        max_label = int(image.max())
+
+    # check if the background_label is valid
+    if background_label >= 0 and background_label <= max_label:
+        num_labels = max_label
+    else:
+        num_labels = max_label + 1
+
+    onehot = torch.zeros(
+        (num_labels, *image.shape), dtype=torch.float32, device=image.device
+    )
+    count = 0
+    for i in range(num_labels + 1):
+        if i == background_label:
+            continue
+        onehot[count, ...] = image == i
+        count += 1
+    return onehot
+
+
+def grad_smoothing_hook(grad: torch.Tensor, gaussians: List[torch.Tensor]):
+    """this backward hook will smooth out the gradient using the gaussians
+    has to be called with a partial function
+    """
+    # grad is of shape [B, H, W, D, dims]
+    if len(grad.shape) == 5:
+        permute_vtoimg = (0, 4, 1, 2, 3)
+        permute_imgtov = (0, 2, 3, 4, 1)
+    elif len(grad.shape) == 4:
+        permute_vtoimg = (0, 3, 1, 2)
+        permute_imgtov = (0, 2, 3, 1)
+    return seperate_filter(grad.permute(*permute_vtoimg), gaussians).permute(
+        *permute_imgtov
+    )
+
+
+def compute_inverse_warp_exp(warp, grid, lr=5e-3, iters=200, n=10):
+    """compute warp inverse using exponential map"""
+    with torch.set_grad_enabled(True):
+        vel = nn.Parameter(torch.zeros_like(warp))
+        optim = torch.optim.Adam([vel], lr=lr)
+        permute_vtoimg = (0, 4, 1, 2, 3) if len(warp.shape) == 5 else (0, 3, 1, 2)
+        permute_imgtov = (0, 2, 3, 4, 1) if len(warp.shape) == 5 else (0, 2, 3, 1)
+        pbar = range(iters)
+        for i in pbar:
+            optim.zero_grad()
+            invwarp = scaling_and_squaring(vel, grid, n=n)
+            loss = invwarp + F.grid_sample(
+                warp.permute(*permute_vtoimg),
+                grid + invwarp,
+                mode="bilinear",
+                align_corners=True,
+            ).permute(*permute_imgtov)
+            loss2 = warp + F.grid_sample(
+                invwarp.permute(*permute_vtoimg),
+                grid + warp,
+                mode="bilinear",
+                align_corners=True,
+            ).permute(*permute_imgtov)
+            loss = (loss**2).sum() + (loss2**2).sum()
+            loss.backward()
+            optim.step()
+    return scaling_and_squaring(vel.data, grid, n=n)
