@@ -23,7 +23,7 @@ class DiffRegistration:
         deformation_type="geodesic",
         optimizer="Adam",
         optimizer_params={},
-        optimizer_lr=1e-4,
+        optimizer_lr=0.25,
         integrator_n=6,
         mi_kernel_type="b-spline",
         cc_kernel_type="rectangular",
@@ -69,33 +69,18 @@ class DiffRegistration:
         else:
             raise ValueError(f"Loss type {loss_type} not supported")
 
-        # Initialize deformation
-        if deformation_type == "geodesic":
-            geodesic_params = {
-                "fixed_images": fixed_images,
-                "integrator_n": integrator_n,
-                "optimizer": optimizer,
-                "optimizer_lr": optimizer_lr,
-                "optimizer_params": optimizer_params,
-                "smoothing_grad_sigma": smooth_grad_sigma,
-                "init_scale": scales[0],
-            }
-            self.warp = GeodesicShooting(**geodesic_params)
-            
-        elif deformation_type == "compositive":
-            compositive_params = {
-                "fixed_images": fixed_images,
-                "moving_images": moving_images,
-                "optimizer": optimizer,
-                "optimizer_lr": optimizer_lr,
-                "optimizer_params": optimizer_params,
-                "smoothing_grad_sigma": smooth_grad_sigma,
-                "smoothing_warp_sigma": smooth_warp_sigma,
-                "init_scale": scales[0],
-            }
-            self.warp = CompositiveWarp(**compositive_params
-        else:
-            raise ValueError(f"Invalid deformation type: {deformation_type}")
+        compositive_params = {
+            "fixed_images": fixed_images,
+            "moving_images": moving_images,
+            "optimizer": optimizer,
+            "optimizer_lr": optimizer_lr,
+            "optimizer_params": optimizer_params,
+            "init_scale": scales[0],
+            "smoothing_grad_sigma": smooth_grad_sigma,
+            "smoothing_warp_sigma": smooth_warp_sigma,
+        }
+        self.warp = CompositiveWarp(**compositive_params)
+        smooth_warp_sigma = 0
 
         self.smooth_warp_sigma = smooth_warp_sigma
 
@@ -158,6 +143,12 @@ class DiffRegistration:
             moving_arrays, moved_coords, mode="bilinear", align_corners=True
         )
         return moved_image
+
+    def compute_regularization_loss(self, warp_field):
+        """Compute regularization loss."""
+        grad = torch.gradient(warp_field, dim=(1, 2, 3))
+        grad_norm = sum(torch.sum(g**2) for g in grad)
+        return grad_norm
 
     def optimize(self, save_transformed=False):
         fixed_arrays = self.fixed_images()
@@ -228,7 +219,9 @@ class DiffRegistration:
                     moved_image = moved_image.to(self.loss_device)
                     fixed_image_down = fixed_image_down.to(self.loss_device)
 
-                loss = self.loss_fn(moved_image, fixed_image_down)
+                sim_loss = self.loss_fn(moved_image, fixed_image_down)
+                reg_loss = self.compute_regularization_loss(warp_field)
+                loss = sim_loss + 0.01 * reg_loss
                 loss.backward(retain_graph=True)
                 self.warp.step()
 
@@ -245,123 +238,6 @@ class DiffRegistration:
 
         if save_transformed:
             return transformed_images
-
-
-class GeodesicShooting(nn.Module):
-    def __init__(
-        self,
-        fixed_images,
-        integrator_n=6,
-        optimizer="Adam",
-        optimizer_lr=1e-2,
-        optimizer_params={},
-        smoothing_grad_sigma=0.5,
-        init_scale=1,
-    ) -> None:
-        super().__init__()
-        self.num_images = num_images = fixed_images.size()
-        spatial_dims = fixed_images.shape[2:]
-        if init_scale > 1:
-            spatial_dims = [max(int(s / init_scale), 1) for s in spatial_dims]
-        self.n_dims = len(spatial_dims)
-        self.device = fixed_images.device
-
-        self.permute_imgtov = (0, *range(2, self.n_dims + 2), 1)
-        self.permute_vtoimg = (0, self.n_dims + 1, *range(1, self.n_dims + 1))
-
-        velocity_field = torch.zeros(
-            [num_images, *spatial_dims, self.n_dims],
-            dtype=torch.float32,
-            device=fixed_images.device,
-        )
-
-        self.smoothing_grad_sigma = smoothing_grad_sigma
-        if smoothing_grad_sigma > 0:
-            self.smoothing_grad_gaussians = [
-                gaussian_1d(s, truncated=2)
-                for s in (
-                    torch.zeros(self.n_dims, device=fixed_images.device)
-                    + smoothing_grad_sigma
-                )
-            ]
-
-        self.initialize_grid(spatial_dims)
-        self.register_parameter("velocity_field", nn.Parameter(velocity_field))
-        self.attach_grad_hook()
-
-        self.integrator_n = integrator_n
-
-        self.optimizer = getattr(torch.optim, optimizer)(
-            [self.velocity_field], lr=optimizer_lr, **optimizer_params
-        )
-        self.optimizer_lr = optimizer_lr
-        self.optimizer_name = optimizer
-
-    def attach_grad_hook(self):
-        if self.smoothing_grad_sigma > 0:
-            hook = partial(grad_smoothing_hook, gaussians=self.smoothing_grad_gaussians)
-            self.velocity_field.register_hook(hook)
-
-    def initialize_grid(self, size):
-        grid = F.affine_grid(
-            torch.eye(self.n_dims, self.n_dims + 1, device=self.device)[None].expand(
-                self.num_images, -1, -1
-            ),
-            [self.num_images, self.n_dims, *size],
-            align_corners=True,
-        )
-        self.register_buffer("grid", grid)
-
-    def set_zero_grad(self):
-        self.optimizer.zero_grad()
-
-    def step(self):
-        self.optimizer.step()
-
-    def get_warp(self):
-        if self.integrator_n == "auto":
-            raise NotImplementedError("Automatic integrator_n not implemented yet")
-        else:
-            n = self.integrator_n
-        warp = scaling_and_squaring(self.velocity_field, self.grid, n=n)
-        return warp
-
-    def get_inverse_warp(self, *args, **kwargs):
-        return compute_inverse_warp_exp(self.get_warp().detach(), self.grid)
-
-    def set_size(self, size):
-        mode = "bilinear" if self.n_dims == 2 else "trilinear"
-        old_shape = self.velocity_field.shape
-        old_optimizer_state = self.optimizer.state_dict()
-
-        velocity_field = F.interpolate(
-            self.velocity_field.detach().permute(*self.permute_vtoimg),
-            size=size,
-            mode=mode,
-            align_corners=True,
-        ).permute(*self.permute_imgtov)
-        velocity_field = nn.Parameter(velocity_field)
-        self.register_parameter("velocity_field", velocity_field)
-        self.attach_grad_hook()
-
-        self.initialize_grid(size)
-        self.optimizer = getattr(torch.optim, self.optimizer_name)(
-            [self.velocity_field], lr=self.optimizer_lr
-        )
-
-        state_dict = old_optimizer_state["state"]
-        old_optimizer_state["param_groups"] = self.optimizer.state_dict()["param_groups"]
-        for g in state_dict.keys():
-            for k, v in state_dict[g].items():
-                if isinstance(v, torch.Tensor) and v.shape == old_shape:
-                    state_dict[g][k] = F.interpolate(
-                        v.permute(*self.permute_vtoimg),
-                        size=size,
-                        mode=mode,
-                        align_corners=True,
-                    ).permute(*self.permute_imgtov)
-
-        self.optimizer.load_state_dict(old_optimizer_state)
 
 
 class CompositiveWarp(nn.Module):
@@ -444,7 +320,6 @@ class CompositiveWarp(nn.Module):
             oparams["warpinv"] = self.inv
         # add optimizer
         optimizer = optimizer.lower()
-        assert optimizer == "Adam", f"Optimizer {optimizer} not implemented"
         self.optimizer = WarpAdam(self.warp, lr=optimizer_lr, **oparams)
 
     def attach_grad_hook(self):

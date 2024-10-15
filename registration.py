@@ -8,7 +8,6 @@ import torch.nn.functional as F
 
 from affine import AffineRegistration
 from data_load import BatchedImages, Image
-from deep_feature import DeepFeatureRegistration
 from diffeomorph import DiffRegistration
 
 
@@ -167,7 +166,7 @@ def main():
         affine_kwargs={"loss_type": args.loss_type},
         diff_kwargs={
             "loss_type": args.loss_type,
-            "deformation_type": "geodesic",
+            "deformation_type": "compositive",
             "integrator_n": args.integrator_n,
         },
     )
@@ -179,8 +178,8 @@ def main():
 
         # Create the output directory
         moving_dir, moving_filename = os.path.split(args.moving)
-        moving_basename = os.path.basename(moving_filename)
-        relative_path = os.path.relapath(moving_dir, start=os.path.dirname(moving_dir))
+        moving_basename = os.path.splitext(moving_filename)[0]
+        relative_path = os.path.relpath(moving_dir, start=os.path.dirname(moving_dir))
 
         affine_pred_path = os.path.join(
             args.output, relative_path, f"{moving_basename}_affine.tif"

@@ -279,19 +279,13 @@ def downsample(
 
 def scaling_and_squaring(u, grid, n=6):
     """
-    Apply scaling and squaring to a displacement field
-
-    :param u: Input stationary velocity field, PyTorch tensor of shape [B, D, H, W, 3] or [B, H, W, 2]
-    :param grid: Sampling grid of size [B, D, H, W, dims]  or [B, H, W, dims]
-    :param n: Number of iterations of scaling and squaring (default: 6)
-
-    :returns: Output displacement field, v, PyTorch tensor of shape [B, D, H, W, dims] or [B, H, W, dims]
+    Apply scaling and squaring to a displacement field.
     """
     dims = u.shape[-1]
     v = (1.0 / 2**n) * u
     if dims == 3:
         for i in range(n):
-            vimg = v.permute(0, 4, 1, 2, 3)  # [1, 3, D, H, W]
+            vimg = v.permute(0, 4, 1, 2, 3)
             v = v + F.grid_sample(vimg, v + grid, align_corners=True).permute(
                 0, 2, 3, 4, 1
             )
