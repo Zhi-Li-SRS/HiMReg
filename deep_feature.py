@@ -9,7 +9,8 @@ import torchvision.models as models
 class FeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
-        resnet = models.resnet18(pretrained=True)
+        weights = models.ResNet18_Weights.DEFAULT
+        resnet = models.resnet18(weights=weights)
         self.features = nn.Sequential(*list(resnet.children())[:-2])
 
     def forward(self, x):
@@ -27,18 +28,18 @@ def extract_features(image, feature_extractor):
 
 
 def match_features(features1, features2):
-    # 将特征图转换为关键点和描述符
     kp1, des1 = features_to_keypoints(features1)
     kp2, des2 = features_to_keypoints(features2)
 
-    # 使用FLANN匹配器
+    if len(kp1) < 2 or len(kp2) < 2:
+        return [], [], []
+
     FLANN_INDEX_KDTREE = 1
     index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
     search_params = dict(checks=50)
     flann = cv2.FlannBasedMatcher(index_params, search_params)
     matches = flann.knnMatch(des1, des2, k=2)
 
-    # 应用Lowe's ratio测试
     good_matches = []
     for m, n in matches:
         if m.distance < 0.7 * n.distance:
@@ -51,12 +52,29 @@ def features_to_keypoints(features):
     """Make keypoints and descriptors from features."""
     feature_map = features.squeeze().permute(1, 2, 0).cpu().numpy()  # (H, W, C)
     gray = cv2.normalize(feature_map, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
-    kp = cv2.KeyPoint_convert(np.argwhere(np.max(gray, axis=2) > 0))
-    des = feature_map[np.max(gray, axis=2) > 0]
+
+    # Find the strongest corners in the image
+    corners = cv2.goodFeaturesToTrack(
+        np.max(gray, axis=2), maxCorners=1000, qualityLevel=0.01, minDistance=10
+    )
+
+    if corners is not None:
+        corners = corners.reshape(-1, 2)
+        kp = [
+            cv2.KeyPoint(x=float(corner[0]), y=float(corner[1]), size=1)
+            for corner in corners
+        ]
+        des = feature_map[corners[:, 1].astype(int), corners[:, 0].astype(int)]
+    else:
+        kp = []
+        des = np.array([])
+
     return kp, des
 
 
 def estimate_affine(kp1, kp2, good_matches):
+    if len(good_matches) < 4:
+        return None
     src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
@@ -77,6 +95,9 @@ class DeepFeatureRegistration:
         matches, kp1, kp2 = match_features(fixed_features, moving_features)
 
         M = estimate_affine(kp1, kp2, matches)
+        if M is None:
+            print("Not enough matches found to estimate affine transformation")
+            return moving_image, np.eye(3)[:2]
 
         height, width = fixed_image.shape[2:]
         moved_image = cv2.warpAffine(
@@ -85,4 +106,4 @@ class DeepFeatureRegistration:
         moved_image = (
             torch.from_numpy(moved_image).unsqueeze(0).unsqueeze(0).to(self.device)
         )
-        return moved_image, M
+        return moved_image, torch.from_numpy(M).to(self.device)
