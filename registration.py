@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from affine import AffineRegistration
 from data_load import BatchedImages, Image
+from deep_feature import DeepFeatureRegistration
 from diffeomorph import DiffRegistration
 
 
@@ -38,6 +39,7 @@ class Registration:
         self.fixed_images = fixed_images
         self.moving_images = moving_images
 
+        self.deep_reg = DeepFeatureRegistration(device=fixed_images.device)
         self.affine_registration = AffineRegistration(
             scales=affine_scales,
             iterations=affine_iterations,
@@ -55,11 +57,16 @@ class Registration:
         )
 
     def register(self, save_transformed=False):
-        affine_transformed = self.affine_registration.optimize(
-            save_transformed=save_transformed
-        )
 
-        affine_matrix = self.affine_registration.get_affine_matrix()
+        fixed_arrays = self.fixed_images()
+        moving_arrays = self.moving_images()
+        moved_image, affine_matrix = self.deep_reg.register(fixed_arrays, moving_arrays)
+
+        # affine_transformed = self.affine_registration.optimize(
+        #     save_transformed=save_transformed
+        # )
+
+        # affine_matrix = self.affine_registration.get_affine_matrix()
 
         self.diff_registration.affine = affine_matrix
         diff_transformed = self.diff_registration.optimize(
@@ -67,7 +74,7 @@ class Registration:
         )
 
         if save_transformed:
-            return affine_transformed, diff_transformed
+            return moved_image, diff_transformed
         else:
             return None
 
@@ -155,8 +162,8 @@ def main():
     registration = Registration(
         fixed_images=fixed_image,
         moving_images=moving_image,
-        affine_scales=args.affine_scales,
-        affine_iterations=args.affine_iterations,
+        affine_scales=[1],
+        affine_iterations=[1],
         diff_scales=args.diff_scales,
         diff_iterations=args.diff_iterations,
         affine_kwargs={"loss_type": args.loss_type},
