@@ -62,6 +62,78 @@ class ConvergenceMonitor:
         self.losses.clear()
 
 
+def jacobian_2d(u: torch.Tensor, normalize: bool):
+    """u: displacement vector of size [N, H, W, 2]"""
+    B, H, W, _ = u.shape
+    newshape = [B, 2, H, W, 2]
+    J = torch.empty(newshape, dtype=u.dtype, device=u.device)
+    # Compute Jacobian of u and v using image_gradient_singlechannel function
+    for i in range(2):
+        J[..., i] = image_gradient_singlechannel(u[..., i].reshape(B, 1, H, W), normalize)
+    return J
+
+
+def jacobian_3d(u: torch.Tensor, normalize: bool):
+    """u: displacement vector of size [N, H, W, D, 3]"""
+    B, H, W, D, _ = u.shape
+    newshape = [B, 3, H, W, D, 3]
+    J = torch.empty(newshape, dtype=u.dtype, device=u.device)
+    for i in range(3):
+        J[..., i] = image_gradient_singlechannel(
+            u[..., i].reshape(B, 1, H, W, D), normalize
+        )
+    return J
+
+
+def jacobian(u: torch.Tensor, normalize=True):
+    """
+    u: displacement vector of size [N, H, W, [D], dims]
+    """
+    if len(u.shape) == 4:
+        return jacobian_2d(u, normalize)
+    elif len(u.shape) == 5:
+        return jacobian_3d(u, normalize)
+    else:
+        raise ValueError(f"jacobian not implemented for tensors of shape {u.shape}")
+
+
+def image_gradient_singlechannel(image, normalize=False):
+    """
+    Compute the gradient of an image using central difference approximation
+    :param I: input image, represented as a [B,1,D,H,W] or [B,1,H,W] tensor
+    :returns: gradient of the input image, represented as a [B,C,D,H,W] or [B,C,H,W]  tensor
+
+    :TODO: Add support for multichannel images
+    """
+    dims = len(image.shape) - 2
+    device = image.device
+    grad = None
+    if dims == 2:
+        B, C, H, W = image.shape
+        if normalize:
+            facx, facy = (W - 1) / 2, (H - 1) / 2
+        else:
+            facx, facy = 1, 1
+        k = torch.cuda.FloatTensor([[-1.0, 0.0, 1.0]], device=device)[None, None] / 2
+        gradx = F.conv2d(image, facx * k, padding=(0, 1))
+        grady = F.conv2d(image, facy * k.permute(0, 1, 3, 2), padding=(1, 0))
+        grad = torch.cat([gradx, grady], dim=1)
+    elif dims == 3:
+        B, C, D, H, W = image.shape
+        if normalize:
+            facx, facy, facz = (W - 1) / 2, (H - 1) / 2, (D - 1) / 2
+        else:
+            facx, facy, facz = 1, 1, 1
+        k = torch.cuda.FloatTensor([[[-1.0, 0.0, 1.0]]], device=device)[None, None] / 2
+        gradx = F.conv3d(image, facx * k, padding=(0, 0, 1))
+        grady = F.conv3d(image, facy * k.permute(0, 1, 2, 4, 3), padding=(0, 1, 0))
+        gradz = F.conv3d(image, facz * k.permute(0, 1, 4, 2, 3), padding=(1, 0, 0))
+        grad = torch.cat([gradx, grady, gradz], dim=1)
+    else:
+        raise ValueError("Invalid dimension: {}".format(dims))
+    return grad
+
+
 def gaussian_1d(sigma: torch.Tensor, truncated=4.0, approx="erf", normalize=True):
     """
     Compute 1D Gaussian kernel.
@@ -308,3 +380,38 @@ def compute_inverse_warp_exp(warp, grid, lr=5e-3, iters=200, n=10):
             loss.backward()
             optim.step()
     return scaling_and_squaring(vel.data, grid, n=n)
+
+
+def compute_inverse_warp_displacement(
+    warp, grid, initial_inverse=None, iters=20, lr=1e-2
+):
+    """
+    Compute the inverse warp using a given warp, grid and optional initialization
+    """
+    permute_vtoimg = (0, 4, 1, 2, 3) if len(warp.shape) == 5 else (0, 3, 1, 2)
+    permute_imgtov = (0, 2, 3, 4, 1) if len(warp.shape) == 5 else (0, 2, 3, 1)
+    # in case this block is being called within a no_grad block
+    with torch.set_grad_enabled(True):
+        if initial_inverse is None:
+            invwarp = nn.Parameter(torch.zeros_like(warp.detach()))
+        else:
+            invwarp = nn.Parameter(initial_inverse.detach())
+        optim = torch.optim.SGD([invwarp], lr=lr)
+        for i in range(iters):
+            optim.zero_grad()
+            loss = invwarp + F.grid_sample(
+                warp.permute(*permute_vtoimg),
+                grid + invwarp,
+                mode="bilinear",
+                align_corners=True,
+            ).permute(*permute_imgtov)
+            loss2 = warp + F.grid_sample(
+                invwarp.permute(*permute_vtoimg),
+                grid + warp,
+                mode="bilinear",
+                align_corners=True,
+            ).permute(*permute_imgtov)
+            loss = (loss**2).sum() + (loss2**2).sum()
+            loss.backward()
+            optim.step()
+    return invwarp.data
