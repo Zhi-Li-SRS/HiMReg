@@ -75,11 +75,7 @@ class Image:
         """Load an image from a SimpleITK image."""
         self.itk_image = itk_image
         self.dims = self.itk_image.GetDimension()
-        self.array = (
-            torch.from_numpy(sitk.GetArrayFromImage(self.itk_image))
-            .to(self.device)
-            .float()
-        )
+        self.array = torch.from_numpy(sitk.GetArrayFromImage(self.itk_image)).to(self.device).float()
 
     def load_from_numpy(self, np_array: np.ndarray):
         """Load an image from a numpy array."""
@@ -99,9 +95,7 @@ class Image:
         elif self.array.ndim == 3:
             self.dims = 3
         elif self.array.ndim > 3:
-            self.dims = (
-                self.array.ndim - 2
-            )  # Assuming first two dims are batch and channel
+            self.dims = self.array.ndim - 2  # Assuming first two dims are batch and channel
         else:
             raise ValueError(f"Unsupported number of dimensions: {self.array.ndim}")
 
@@ -110,19 +104,13 @@ class Image:
 
     def _init_regular_image(self):
         """Initialize a regular image."""
-        self.array = self.array.unsqueeze(0).unsqueeze(
-            0
-        )  # Add batch and channel dimensions
+        self.array = self.array.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
         self.channels = 1
         assert self.channels == 1, "Only single channel images are currently supported"
 
     def _init_segmentation(self, max_seg_label, background_seg_label, seg_preprocessor):
         """Initialize a segmentation mask."""
-        array = (
-            torch.from_numpy(sitk.GetArrayFromImage(self.itk_image).astype(int))
-            .to(self.device)
-            .long()
-        )
+        array = torch.from_numpy(sitk.GetArrayFromImage(self.itk_image).astype(int)).to(self.device).long()
         array = seg_preprocessor(array)
         if max_seg_label is not None:
             array[array > max_seg_label] = background_seg_label
@@ -134,16 +122,8 @@ class Image:
 
     def _init_transformations(self, spacing, direction, origin, center):
         """Initialize the transformation matrices."""
-        spacing = (
-            np.array(self.itk_image.GetSpacing())[None]
-            if spacing is None
-            else np.array(spacing)[None]
-        )
-        origin = (
-            np.array(self.itk_image.GetOrigin())[None]
-            if origin is None
-            else np.array(origin)[None]
-        )
+        spacing = np.array(self.itk_image.GetSpacing())[None] if spacing is None else np.array(spacing)[None]
+        origin = np.array(self.itk_image.GetOrigin())[None] if origin is None else np.array(origin)[None]
         direction = (
             np.array(self.itk_image.GetDirection()).reshape(self.dims, self.dims)
             if direction is None
@@ -155,10 +135,7 @@ class Image:
             origin = (
                 center
                 - np.matmul(
-                    direction,
-                    ((np.array(self.itk_image.GetSize()) * spacing / 2).squeeze())[
-                        :, None
-                    ],
+                    direction, ((np.array(self.itk_image.GetSize()) * spacing / 2).squeeze())[:, None]
                 ).T
             )
 
@@ -171,12 +148,7 @@ class Image:
         torch2px[: self.dims, : self.dims] = np.diag(scaleterm)
         torch2px[: self.dims, -1] = scaleterm
 
-        self.torch2phy = (
-            torch.from_numpy(np.matmul(px2phy, torch2px))
-            .to(self.device)
-            .float()
-            .unsqueeze(0)
-        )
+        self.torch2phy = torch.from_numpy(np.matmul(px2phy, torch2px)).to(self.device).float().unsqueeze(0)
         self.phy2torch = torch.inverse(self.torch2phy[0]).float().unsqueeze(0)
 
     @classmethod

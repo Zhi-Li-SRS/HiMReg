@@ -59,16 +59,12 @@ class Registration:
         fixed_arrays = self.fixed_images()
         moving_arrays = self.moving_images()
 
-        affine_transformed = self.affine_registration.optimize(
-            save_transformed=save_transformed
-        )
+        affine_transformed = self.affine_registration.optimize(save_transformed=save_transformed)
 
         affine_matrix = self.affine_registration.get_affine_matrix()
 
         self.diff_registration.affine = affine_matrix
-        diff_transformed = self.diff_registration.optimize(
-            save_transformed=save_transformed
-        )
+        diff_transformed = self.diff_registration.optimize(save_transformed=save_transformed)
 
         if save_transformed:
             return affine_transformed, diff_transformed
@@ -76,9 +72,7 @@ class Registration:
             return None
 
     def get_final_transformation(self):
-        final_warp = self.diff_registration.get_warped_coordinates(
-            self.fixed_images, self.moving_images
-        )
+        final_warp = self.diff_registration.get_warped_coordinates(self.fixed_images, self.moving_images)
         return final_warp
 
     def apply_transformation(self, image: torch.Tensor):
@@ -89,10 +83,12 @@ class Registration:
         return transformed_image
 
     def save_affine_matrix(self, output_path):
-        affine_matrix = (
-            self.affine_registration.get_affine_matrix().detach().cpu().numpy()
-        )
+        affine_matrix = self.affine_registration.get_affine_matrix().detach().cpu().numpy()
         np.save(output_path, affine_matrix)
+
+    # def save_deformation_field(self, output_path):
+    #     deformation_field = self.diff_registration.get_warped_coordinates().detach().cpu().numpy()
+    #     np.save(output_path, deformation_field)
 
     def apply_affine(self, image_path, matrix_path, device="cuda"):
         """Apply affine transformation to an image."""
@@ -101,49 +97,35 @@ class Registration:
 
         image = Image.load_file(image_path, device=device)
         image_batch = BatchedImages(image)
-        transformed_image = F.affine_grid(
-            affine_matrix[:, :image], image_batch().shape, aline_corners=True
-        )
+        transformed_image = F.affine_grid(affine_matrix[:, :image], image_batch().shape, aline_corners=True)
         transformed_image = F.grid_sample(
             image_batch(), transformed_image, mode="bilinear", align_corners=True
         )
         return transformed_image
 
+    def apply_diff(self, image_path, deformation_path: str, device="cuda"):
+        deformation_field = np.load(deformation_path)
+        deformation_field = torch.from_numpy(deformation_field).to(image.device)
+        image = Image.load_file(image_path, device=device)
+        image_batch = BatchedImages(image)
+        transformed_image = F.grid_sample(
+            image_batch(), deformation_field, mode="bilinear", align_corners=True
+        )
+        return transformed_image
+
 
 def get_args():
-    parser = argparse.ArgumentParser(
-        description="Multiscale cross modal image registration"
-    )
+    parser = argparse.ArgumentParser(description="Multiscale cross modal image registration")
+    parser.add_argument("--fixed", type=str, default="data/D385_7A2/he_roi1.tif", help="Path to fixed image")
     parser.add_argument(
-        "--fixed",
-        type=str,
-        default="data/codex/codex_roi1.tif",
-        help="Path to fixed image",
-    )
-    parser.add_argument(
-        "--moving",
-        type=str,
-        default="data/codex/791_roi1.tif",
-        help="Path to moving image",
+        "--moving", type=str, default="data/D385_7A2/lipid_unsat_roi1.tif", help="Path to moving image"
     )
     parser.add_argument("--output", type=str, default="pred", help="Output directory")
-    parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
-    parser.add_argument(
-        "--affine_iterations", nargs="+", type=int, default=[800, 600, 400, 200, 100]
-    )
-    parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
-    parser.add_argument(
-        "--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 200, 100]
-    )
-    parser.add_argument(
-        "--loss_type",
-        choices=["mi", "cc"],
-        default="mi",
-        help="Loss type for registration",
-    )
-    parser.add_argument(
-        "--integrator_n", type=int, default=6, help="Integrator n for GeoDiscShooting"
-    )
+    parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4, 3])
+    parser.add_argument("--affine_iterations", nargs="+", type=int, default=[800, 600, 400, 100])
+    parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 3])
+    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100])
+    parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
     return parser.parse_args()
 
 
@@ -164,11 +146,7 @@ def main():
         diff_scales=args.diff_scales,
         diff_iterations=args.diff_iterations,
         affine_kwargs={"loss_type": args.loss_type},
-        diff_kwargs={
-            "loss_type": args.loss_type,
-            "deformation_type": "compositive",
-            "integrator_n": args.integrator_n,
-        },
+        diff_kwargs={"loss_type": args.loss_type, "deformation_type": "compositive"},
     )
 
     transformed_images = registration.register(save_transformed=True)
@@ -181,15 +159,10 @@ def main():
         moving_basename = os.path.splitext(moving_filename)[0]
         relative_path = os.path.relpath(moving_dir, start=os.path.dirname(moving_dir))
 
-        affine_pred_path = os.path.join(
-            args.output, relative_path, f"{moving_basename}_affine.tif"
-        )
-        diff_pred_path = os.path.join(
-            args.output, relative_path, f"{moving_basename}_diff.tif"
-        )
-        matrix_pred_path = os.path.join(
-            args.output, relative_path, f"{moving_basename}_affine_matrix.npy"
-        )
+        affine_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_affine.tif")
+        diff_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_diff.tif")
+        matrix_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_affine_matrix.npy")
+        # deformation_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_diff_matrix.npy")
         # Create necessary directories
         os.makedirs(os.path.dirname(affine_pred_path), exist_ok=True)
         os.makedirs(os.path.dirname(diff_pred_path), exist_ok=True)
@@ -205,6 +178,9 @@ def main():
 
         # Save affine matrix
         registration.save_affine_matrix(matrix_pred_path)
+
+        # Save deformation field
+        # registration.save_deformation_field(deformation_pred_path)
 
     print("Registration complete. Results saved in output directory.")
 

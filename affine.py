@@ -22,24 +22,23 @@ class AffineRegistration:
         optimizer="Adam",
         optimizer_params={},
         loss_params={},
-        optimizer_lr=0.01,
+        optimizer_lr=3e-3,
         mi_kernel_type="b-spline",
         cc_kernel_type="rectangular",
-        cc_kernel_size=3,
+        cc_kernel_size=7,
         tolerance=1e-6,
         max_tolerance_iters=1000,
         init_rigid=None,
         custom_loss=None,
         blur=True,
+        align_corners=True,
         moved_mask=False,
         progress_bar=True,
     ):
 
         self.scales = scales
         self.iterations = iterations
-        assert len(self.iterations) == len(
-            self.scales
-        ), "Number of iterations must match number of scales"
+        assert len(self.iterations) == len(self.scales), "Number of iterations must match number of scales"
 
         self.fixed_images = fixed_images
         self.moving_images = moving_images
@@ -47,6 +46,7 @@ class AffineRegistration:
         self.dims = fixed_images.dims
         self.progress_bar = progress_bar
         self.blur = blur
+        self.align_corners = align_corners
         self.moved_mask = moved_mask
 
         self.convergence_monitor = ConvergenceMonitor(max_tolerance_iters, tolerance)
@@ -56,9 +56,7 @@ class AffineRegistration:
             self.loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
         elif loss_type == "cc":
             self.loss_fn = LNCC(
-                kernel_type=cc_kernel_type,
-                spatial_dims=self.dims,
-                kernel_size=cc_kernel_size**loss_params,
+                kernel_type=cc_kernel_type, spatial_dims=self.dims, kernel_size=cc_kernel_size, **loss_params
             )
 
         elif loss_type == "custom":
@@ -70,15 +68,9 @@ class AffineRegistration:
         if init_rigid is not None:
             affine = init_rigid
         else:
-            affine = (
-                torch.eye(self.dims, self.dims + 1)
-                .unsqueeze(0)
-                .repeat(fixed_images.size(), 1, 1)
-            )
+            affine = torch.eye(self.dims, self.dims + 1).unsqueeze(0).repeat(fixed_images.size(), 1, 1)
         self.affine = nn.Parameter(affine.to(self.device))
-        self.row = torch.zeros(
-            (fixed_images.size(), 1, self.dims + 1), device=self.device
-        )
+        self.row = torch.zeros((fixed_images.size(), 1, self.dims + 1), device=self.device)
         self.row[:, 0, -1] = 1.0
 
         # Initialize optimizer
@@ -113,14 +105,10 @@ class AffineRegistration:
 
             if self.blur and scale > 1:
                 sigmas = 0.5 * torch.tensor(
-                    [sz / szdown for sz, szdown in zip(fixed_size, size_down)],
-                    device=fixed_arrays.device,
+                    [sz / szdown for sz, szdown in zip(fixed_size, size_down)], device=fixed_arrays.device
                 )
                 fixed_image_down = downsample(
-                    fixed_arrays,
-                    size=size_down,
-                    mode=self.fixed_images.interpolate_mode,
-                    sigma=sigmas,
+                    fixed_arrays, size=size_down, mode=self.fixed_images.interpolate_mode, sigma=sigmas
                 )
                 moving_image_blur = downsample(
                     moving_arrays,
@@ -133,41 +121,31 @@ class AffineRegistration:
                     fixed_arrays,
                     size=size_down,
                     mode=self.fixed_images.interpolate_mode,
-                    align_corners=True,
+                    align_corners=self.align_corners,
                 )
                 moving_image_blur = moving_arrays
 
             fixed_image_coords = F.affine_grid(
-                init_grid, fixed_image_down.shape, align_corners=True
+                init_grid, fixed_image_down.shape, align_corners=self.align_corners
             )
 
             fixed_image_coords_homo = torch.cat(
                 [
                     fixed_image_coords,
-                    torch.ones(
-                        list(fixed_image_coords.shape[:-1]) + [1],
-                        device=fixed_image_coords.device,
-                    ),
+                    torch.ones(list(fixed_image_coords.shape[:-1]) + [1], device=fixed_image_coords.device),
                 ],
                 dim=-1,
             )
-            fixed_image_coords_homo = torch.einsum(
-                "ntd,n...d->n...t", fixed_t2p, fixed_image_coords_homo
-            )
+            fixed_image_coords_homo = torch.einsum("ntd,n...d->n...t", fixed_t2p, fixed_image_coords_homo)
 
             pbar = tqdm(range(iters)) if self.progress_bar else range(iters)
             for i in pbar:
                 self.optimizer.zero_grad()
                 affinemat = self.get_affine_matrix()
-                coords = torch.einsum(
-                    "ntd,n...d->n...t", affinemat, fixed_image_coords_homo
-                )
+                coords = torch.einsum("ntd,n...d->n...t", affinemat, fixed_image_coords_homo)
                 coords = torch.einsum("ntd,n...d->n...t", moving_p2t, coords)
                 moved_image = F.grid_sample(
-                    moving_image_blur,
-                    coords[..., :-1],
-                    mode="bilinear",
-                    align_corners=True,
+                    moving_image_blur, coords[..., :-1], mode="bilinear", align_corners=self.align_corners
                 )
 
                 if self.moved_mask:
@@ -175,7 +153,7 @@ class AffineRegistration:
                         torch.ones_like(moving_image_blur),
                         coords[..., :-1],
                         mode="nearest",
-                        align_corners=True,
+                        align_corners=self.align_corners,
                     )
                 else:
                     moved_mask = None
@@ -188,9 +166,7 @@ class AffineRegistration:
                     break
 
                 if self.progress_bar:
-                    pbar.set_description(
-                        f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}"
-                    )
+                    pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
 
             if save_transformed:
                 transformed_images.append(moved_image)

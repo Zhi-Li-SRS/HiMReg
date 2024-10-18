@@ -48,7 +48,7 @@ class MutualInformation(nn.Module):
         if self.kernel_type == "b-spline":
             return self.estimate_bspline_distribution(img, order=3)
         elif self.kernel_type == "gaussian":
-            return self.parzen_windowing_gaussian(img)
+            return self.estimate_gaussian_distribution(img)
         else:
             raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
 
@@ -85,7 +85,7 @@ class MutualInformation(nn.Module):
         probability = torch.mean(weight, dim=-2, keepdim=True)  # (batch, 1, num_bins)
         return weight, probability
 
-    def estimate_gussian_distribution(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def estimate_gaussian_distribution(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         img = torch.clamp(img, 0, 1)
         img = img.reshape(img.shape[0], -1, 1)  # (batch, num_sample, 1)
         weight = torch.exp(
