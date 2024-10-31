@@ -135,8 +135,6 @@ def main():
 
     fixed_image = Image.load_file(args.fixed, device=device)
     moving_image = Image.load_file(args.moving, device=device)
-    fixed_image = BatchedImages(fixed_image)
-    moving_image = BatchedImages(moving_image)
 
     registration = Registration(
         fixed_images=fixed_image,

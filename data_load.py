@@ -11,14 +11,13 @@ from utils import integer_to_onehot
 class Image:
     """Load the image data and perform preprocessing.
     Args:
-        image_data (Union[str, sitk.Image, np.ndarray, torch.Tensor]): The image data to load.
+        image_data (Union[str, sitk.Image, np.ndarray, torch.Tensor, List]): The image data to load.
         device (torch.device): The device to load the image data on.
         is_segmentation (bool): Whether the image is a segmentation mask. Defaults to False.
         max_seg_label (int): The maximum segmentation label. Defaults to None.
         background_seg_label (int): The background segmentation label. Defaults to 0.
         seg_preprocessor: A function to preprocess the segmentation mask. Defaults to None.
         spacing: The pixel spacing of the image. Defaults to None.
-        direction: The direction of the image. Defaults to None.
         origin: The origin of the image. Defaults to None.
     """
 
@@ -33,7 +32,142 @@ class Image:
         spacing=None,
         direction=None,
         origin=None,
-        center=None,
+    ) -> None:
+
+        self.device = device
+        if isinstance(image_data, list):
+            self.images = [
+                self._load_single_image(
+                    img,
+                    device,
+                    is_segmentation,
+                    max_seg_label,
+                    background_seg_label,
+                    seg_preprocessor,
+                    spacing,
+                    direction,
+                    origin,
+                )
+                for img in image_data
+            ]
+            self._validate_images()
+        else:
+            self.images = [
+                self._load_single_image(
+                    image_data,
+                    device,
+                    is_segmentation,
+                    max_seg_label,
+                    background_seg_label,
+                    seg_preprocessor,
+                    spacing,
+                    direction,
+                    origin,
+                )
+            ]
+
+        self.shape = self.images[0].shape
+        self.n_images = len(self.images)
+        self.interpolate_mode = "bilinear" if self.images[0].dims == 2 else "trilinear"
+
+    def _load_single_image(
+        self,
+        image_data,
+        device,
+        is_segmentation,
+        max_seg_label,
+        background_seg_label,
+        seg_preprocessor,
+        spacing,
+        direction,
+        origin,
+        center,
+    ):
+        image = SingleImage(
+            image_data,
+            device,
+            is_segmentation,
+            max_seg_label,
+            background_seg_label,
+            seg_preprocessor,
+            spacing,
+            direction,
+            origin,
+            center,
+        )
+        return image
+
+    def _validate_images(self):
+        assert len(self.images) > 0, "At least one image must be provided"
+        shapes = [x.shape for x in self.images]
+        if not all(x == shapes[0] for x in shapes):
+            raise ValueError("All images must have the same shape")
+
+    def __call__(self) -> torch.Tensor:
+        """
+        Get the batch of images as a single tensor.
+
+        Returns:
+            torch.Tensor: A tensor containing all images in the batch.
+        """
+        return torch.cat([x.array for x in self.images], dim=0)
+
+    @property
+    def device(self):
+        """Get the device of the images."""
+        return self.images[0].device
+
+    @property
+    def dims(self):
+        """Get the number of spatial dimensions of the images."""
+        return self.images[0].dims
+
+    def size(self):
+        """Get the number of images in the batch."""
+        return self.n_images
+
+    def get_pixel_to_physical(self):
+        """Get the pixel_to_physical transformation matrices for all images in the batch."""
+        return torch.cat([x.pixel_to_physical for x in self.images], dim=0)
+
+    def get_physical_to_pixel(self):
+        """Get the physical_to_pixel transformation matrices for all images in the batch."""
+        return torch.cat([x.physical_to_pixel for x in self.images], dim=0)
+
+    @classmethod
+    def load_file(cls, image_path: str, *args, **kwargs) -> "Image":
+        """
+        Load an image from a file.
+        Args:
+            image_path (str): Path to the image file.
+            *args: Variable length argument list.
+            **kwargs: Arbitrary keyword arguments.
+
+        Returns:
+            Image: An Image object created from the file.
+        """
+        return cls(image_path, *args, **kwargs)
+
+    @property
+    def shape(self):
+        """Get the shape of the image array."""
+        return self.images[0].shape
+
+
+class SingleImage:
+    """Load a single image data and perform preprocessing."""
+
+    def __init__(
+        self,
+        image_data,
+        device,
+        is_segmentation=False,
+        max_seg_label=None,
+        background_seg_label=0,
+        seg_preprocessor=None,
+        spacing=None,
+        direction=None,
+        origin=None,
     ) -> None:
 
         self.device = device
@@ -59,7 +193,7 @@ class Image:
         else:
             self._init_regular_image()
 
-        self._init_transformations(spacing, direction, origin, center)
+        self._init_transformations(spacing, direction, origin)
 
     def load_from_file(self, file_path: str):
         """Load an image from a file."""
@@ -120,7 +254,7 @@ class Image:
         self.array = array.float()
         self.channels = array.shape[1]
 
-    def _init_transformations(self, spacing, direction, origin, center):
+    def _init_transformations(self, spacing, direction, origin):
         """Initialize the transformation matrices."""
         spacing = np.array(self.itk_image.GetSpacing())[None] if spacing is None else np.array(spacing)[None]
         origin = np.array(self.itk_image.GetOrigin())[None] if origin is None else np.array(origin)[None]
@@ -130,104 +264,26 @@ class Image:
             else np.array(direction).reshape(self.dims, self.dims)
         )
 
-        if center is not None:
-            print("Center location provided, recalibrating origin.")
-            origin = (
-                center
-                - np.matmul(
-                    direction, ((np.array(self.itk_image.GetSize()) * spacing / 2).squeeze())[:, None]
-                ).T
-            )
+        pixel_to_physical = np.eye(self.dims + 1)
+        pixel_to_physical[: self.dims, -1] = origin  # define the parallel translation of the image
+        pixel_to_physical[: self.dims, : self.dims] = (
+            direction * spacing
+        )  # define the rotation and scaling of the image
 
-        px2phy = np.eye(self.dims + 1)
-        px2phy[: self.dims, -1] = origin
-        px2phy[: self.dims, : self.dims] = direction * spacing
-
-        torch2px = np.eye(self.dims + 1)
+        physical_to_pixel = np.eye(self.dims + 1)
         scaleterm = (np.array(self.itk_image.GetSize()) - 1) * 0.5
-        torch2px[: self.dims, : self.dims] = np.diag(scaleterm)
-        torch2px[: self.dims, -1] = scaleterm
+        physical_to_pixel[: self.dims, : self.dims] = np.diag(scaleterm)
+        physical_to_pixel[: self.dims, -1] = scaleterm
 
-        self.torch2phy = torch.from_numpy(np.matmul(px2phy, torch2px)).to(self.device).float().unsqueeze(0)
-        self.phy2torch = torch.inverse(self.torch2phy[0]).float().unsqueeze(0)
-
-    @classmethod
-    def load_file(cls, image_path: str, *args, **kwargs) -> "Image":
-        """
-        Load an image from a file.
-        Args:
-            image_path (str): Path to the image file.
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-
-        Returns:
-            Image: An Image object created from the file.
-        """
-        return cls(image_path, *args, **kwargs)
+        self.pixel_to_physical = (
+            torch.from_numpy(np.matmul(pixel_to_physical, physical_to_pixel))
+            .to(self.device)
+            .float()
+            .unsqueeze(0)
+        )
+        self.physical_to_pixel = torch.inverse(self.pixel_to_physical[0]).float().unsqueeze(0)
 
     @property
     def shape(self):
         """Get the shape of the image array."""
         return self.array.shape
-
-
-class BatchedImages:
-
-    def __init__(self, images: Union[Image, List[Image]]) -> None:
-        """
-        Initialize the BatchedImages object.
-
-        Args:
-            images (Union[Image, List[Image]]): A single Image object or a list of Image objects.
-
-        Raises:
-            ValueError: If no images are provided or if images have different shapes.
-            TypeError: If any of the provided images is not an Image object.
-        """
-        if isinstance(images, Image):
-            images = [images]
-        self.images = images
-
-        assert len(self.images) > 0, "At least one image must be provided"
-
-        if not all(isinstance(image, Image) for image in self.images):
-            raise TypeError("All images must be of type Image")
-
-        shapes = [x.array.shape for x in self.images]
-        if not all(x == shapes[0] for x in shapes):
-            raise ValueError("All images must have the same shape")
-
-        self.shape = shapes[0]
-        self.n_images = len(self.images)
-        self.interpolate_mode = "bilinear" if self.images[0].dims == 2 else "trilinear"
-
-    def __call__(self) -> torch.Tensor:
-        """
-        Get the batch of images as a single tensor.
-
-        Returns:
-            torch.Tensor: A tensor containing all images in the batch.
-        """
-        return torch.cat([x.array for x in self.images], dim=0)
-
-    @property
-    def device(self):
-        """Get the device of the images."""
-        return self.images[0].device
-
-    @property
-    def dims(self):
-        """Get the number of spatial dimensions of the images."""
-        return self.images[0].dims
-
-    def size(self):
-        """Get the number of images in the batch."""
-        return self.n_images
-
-    def get_torch2phy(self):
-        """Get the torch2phy transformation matrices for all images in the batch."""
-        return torch.cat([x.torch2phy for x in self.images], dim=0)
-
-    def get_phy2torch(self):
-        """Get the phy2torch transformation matrices for all images in the batch."""
-        return torch.cat([x.phy2torch for x in self.images], dim=0)
