@@ -7,61 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ConvergenceMonitor:
-    def __init__(self, N, slope):
-        """
-        Initialize the ConvergenceMonitor class.
-        Args:
-        - N: number of values to keep track of.
-        """
-        self.N = N
-        self.losses = deque(maxlen=N)
-        self.slope = slope
-
-    def update(self, loss):
-        """Append a new loss value to the monitor."""
-        self.losses.append(loss)
-
-    def _compute_slope(self):
-        """Compute the slope of the best-fit line using simple linear regression."""
-        if len(self.losses) < 2:
-            return 0
-
-        x = np.arange(len(self.losses))
-        y = np.array(self.losses)
-
-        # Compute the slope (m) of the best-fit line y = mx + c
-        # m = (NΣxy - ΣxΣy) / (NΣx^2 - (Σx)^2)
-        xy_sum = np.dot(x, y)
-        x_sum = x.sum()
-        y_sum = y.sum()
-        x_squared_sum = (x**2).sum()
-        N = len(self.losses)
-
-        numerator = N * xy_sum - x_sum * y_sum
-        denominator = N * x_squared_sum - x_sum**2
-        if denominator == 0:
-            return 0
-        slope = numerator / denominator
-        return slope
-
-    def converged(self, loss=None):
-        """Check if the loss has increased (i.e., slope > threshold).
-        optionally, update the monitor with a new loss value.
-        """
-        if loss is not None:
-            self.update(loss)
-        if len(self.losses) < self.N:
-            return False
-        else:
-            slope = self._compute_slope()
-            return slope > self.slope
-
-    def reset(self):
-        """Reset the monitor."""
-        self.losses.clear()
-
-
 def jacobian_2d(u: torch.Tensor, normalize: bool):
     """u: displacement vector of size [N, H, W, 2]"""
     B, H, W, _ = u.shape
@@ -79,9 +24,7 @@ def jacobian_3d(u: torch.Tensor, normalize: bool):
     newshape = [B, 3, H, W, D, 3]
     J = torch.empty(newshape, dtype=u.dtype, device=u.device)
     for i in range(3):
-        J[..., i] = image_gradient_singlechannel(
-            u[..., i].reshape(B, 1, H, W, D), normalize
-        )
+        J[..., i] = image_gradient_singlechannel(u[..., i].reshape(B, 1, H, W, D), normalize)
     return J
 
 
@@ -149,9 +92,7 @@ def gaussian_1d(sigma: torch.Tensor, truncated=4.0, approx="erf", normalize=True
     """
     device = sigma.device
     sigma = torch.as_tensor(
-        sigma,
-        dtype=torch.float,
-        device=device if isinstance(sigma, torch.Tensor) else None,
+        sigma, dtype=torch.float, device=device if isinstance(sigma, torch.Tensor) else None
     )
     if truncated < 0.0:
         raise ValueError("truncated must be positve")
@@ -191,9 +132,7 @@ def make_triangular_kernel(kernel_size):
 def make_gaussian_kernel(kernel_size, sigma):
     """Create a Gaussian kernel of size kernel_size."""
     sigma = torch.tensor(kernel_size / 3.0)
-    kernel = gaussian_1d(sigma, truncated=4.0, approx="erf", normalize=True) * (
-        2.5066282 * sigma
-    )
+    kernel = gaussian_1d(sigma, truncated=4.0, approx="erf", normalize=True) * (2.5066282 * sigma)
 
     return kernel[:kernel_size]
 
@@ -286,9 +225,7 @@ def scaling_and_squaring(u, grid, n=6):
     if dims == 3:
         for i in range(n):
             vimg = v.permute(0, 4, 1, 2, 3)
-            v = v + F.grid_sample(vimg, v + grid, align_corners=True).permute(
-                0, 2, 3, 4, 1
-            )
+            v = v + F.grid_sample(vimg, v + grid, align_corners=True).permute(0, 2, 3, 4, 1)
     elif dims == 2:
         for i in range(n):
             vimg = v.permute(0, 3, 1, 2)
@@ -319,9 +256,7 @@ def integer_to_onehot(image: torch.Tensor, background_label: int = 0, max_label=
     else:
         num_labels = max_label + 1
 
-    onehot = torch.zeros(
-        (num_labels, *image.shape), dtype=torch.float32, device=image.device
-    )
+    onehot = torch.zeros((num_labels, *image.shape), dtype=torch.float32, device=image.device)
     count = 0
     for i in range(num_labels + 1):
         if i == background_label:
@@ -342,9 +277,7 @@ def grad_smoothing_hook(grad: torch.Tensor, gaussians: List[torch.Tensor]):
     elif len(grad.shape) == 4:
         permute_vtoimg = (0, 3, 1, 2)
         permute_imgtov = (0, 2, 3, 1)
-    return seperate_filter(grad.permute(*permute_vtoimg), gaussians).permute(
-        *permute_imgtov
-    )
+    return seperate_filter(grad.permute(*permute_vtoimg), gaussians).permute(*permute_imgtov)
 
 
 def compute_inverse_warp_exp(warp, grid, lr=5e-3, iters=200, n=10):
@@ -359,16 +292,10 @@ def compute_inverse_warp_exp(warp, grid, lr=5e-3, iters=200, n=10):
             optim.zero_grad()
             invwarp = scaling_and_squaring(vel, grid, n=n)
             loss = invwarp + F.grid_sample(
-                warp.permute(*permute_vtoimg),
-                grid + invwarp,
-                mode="bilinear",
-                align_corners=True,
+                warp.permute(*permute_vtoimg), grid + invwarp, mode="bilinear", align_corners=True
             ).permute(*permute_imgtov)
             loss2 = warp + F.grid_sample(
-                invwarp.permute(*permute_vtoimg),
-                grid + warp,
-                mode="bilinear",
-                align_corners=True,
+                invwarp.permute(*permute_vtoimg), grid + warp, mode="bilinear", align_corners=True
             ).permute(*permute_imgtov)
             loss = (loss**2).sum() + (loss2**2).sum()
             loss.backward()
@@ -376,9 +303,7 @@ def compute_inverse_warp_exp(warp, grid, lr=5e-3, iters=200, n=10):
     return scaling_and_squaring(vel.data, grid, n=n)
 
 
-def compute_inverse_warp_displacement(
-    warp, grid, initial_inverse=None, iters=20, lr=1e-2
-):
+def compute_inverse_warp_displacement(warp, grid, initial_inverse=None, iters=20, lr=1e-2):
     """
     Compute the inverse warp using a given warp, grid and optional initialization
     """
@@ -394,16 +319,10 @@ def compute_inverse_warp_displacement(
         for i in range(iters):
             optim.zero_grad()
             loss = invwarp + F.grid_sample(
-                warp.permute(*permute_vtoimg),
-                grid + invwarp,
-                mode="bilinear",
-                align_corners=True,
+                warp.permute(*permute_vtoimg), grid + invwarp, mode="bilinear", align_corners=True
             ).permute(*permute_imgtov)
             loss2 = warp + F.grid_sample(
-                invwarp.permute(*permute_vtoimg),
-                grid + warp,
-                mode="bilinear",
-                align_corners=True,
+                invwarp.permute(*permute_vtoimg), grid + warp, mode="bilinear", align_corners=True
             ).permute(*permute_imgtov)
             loss = (loss**2).sum() + (loss2**2).sum()
             loss.backward()

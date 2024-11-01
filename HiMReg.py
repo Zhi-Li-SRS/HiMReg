@@ -11,7 +11,7 @@ from data_load import BatchedImages, Image
 from diffeomorph import DiffRegistration
 
 
-class Registration:
+class HiMReg:
     """Class for performing affine and diffeomorphic registration on a pair of images.
     Args:
         fixed_images (BatchedImages): BatchedImages object of fixed images.
@@ -55,9 +55,6 @@ class Registration:
         )
 
     def register(self, save_transformed=False):
-
-        fixed_arrays = self.fixed_images()
-        moving_arrays = self.moving_images()
 
         affine_transformed = self.affine_registration.optimize(save_transformed=save_transformed)
 
@@ -136,7 +133,7 @@ def main():
     fixed_image = Image.load_file(args.fixed, device=device)
     moving_image = Image.load_file(args.moving, device=device)
 
-    registration = Registration(
+    registration = HiMReg(
         fixed_images=fixed_image,
         moving_images=moving_image,
         affine_scales=args.affine_scales,

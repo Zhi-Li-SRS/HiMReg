@@ -1,12 +1,14 @@
+from collections import deque
 from typing import List, Optional
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import SGD, Adam
 from tqdm import tqdm
 
-from data_load import BatchedImages
+from data_load import Image
 from losses import LNCC, MutualInformation
 from utils import *
 
@@ -16,8 +18,8 @@ class AffineRegistration:
         self,
         scales=[8, 6, 4, 2, 1],
         iterations=[80, 600, 400, 200, 100],
-        fixed_images=BatchedImages,
-        moving_images=BatchedImages,
+        fixed_images=Image,
+        moving_images=Image,
         loss_type="mi",
         optimizer="Adam",
         optimizer_params={},
@@ -33,7 +35,6 @@ class AffineRegistration:
         blur=True,
         align_corners=True,
         moved_mask=False,
-        progress_bar=True,
     ):
 
         self.scales = scales
@@ -44,12 +45,13 @@ class AffineRegistration:
         self.moving_images = moving_images
         self.device = fixed_images.device
         self.dims = fixed_images.dims
-        self.progress_bar = progress_bar
         self.blur = blur
         self.align_corners = align_corners
         self.moved_mask = moved_mask
 
-        self.convergence_monitor = ConvergenceMonitor(max_tolerance_iters, tolerance)
+        self.tolerance = tolerance
+        self.max_tolerance_iters = max_tolerance_iters
+        self.losses = deque(maxlen=max_tolerance_iters)
 
         # Initialize loss function
         if loss_type == "mi":
@@ -71,7 +73,7 @@ class AffineRegistration:
             affine = torch.eye(self.dims, self.dims + 1).unsqueeze(0).repeat(fixed_images.size(), 1, 1)
         self.affine = nn.Parameter(affine.to(self.device))
         self.row = torch.zeros((fixed_images.size(), 1, self.dims + 1), device=self.device)
-        self.row[:, 0, -1] = 1.0
+        self.row[:, 0, -1] = 1  # （batch, 1, self.dims + 1）but last element is 1s
 
         # Initialize optimizer
         if optimizer == "SGD":
@@ -83,6 +85,36 @@ class AffineRegistration:
 
     def get_affine_matrix(self):
         return torch.cat([self.affine, self.row], dim=1)
+
+    def _compute_slope(self):
+        """Compute the slope of the best-fit line using simple linear regression."""
+        if len(self.losses) < 2:
+            return 0
+
+        x = np.arange(len(self.losses))
+        y = np.array(self.losses)
+
+        xy_sum = np.dot(x, y)
+        x_sum = x.sum()
+        y_sum = y.sum()
+        x_squared_sum = (x**2).sum()
+        N = len(self.losses)
+
+        numerator = N * xy_sum - x_sum * y_sum
+        denominator = N * x_squared_sum - x_sum**2
+        if denominator == 0:
+            return 0
+        slope = numerator / denominator
+        return slope
+
+    def converged(self, loss):
+        """Check if the loss has increased (i.e., slope > threshold)."""
+        self.losses.append(loss)
+        if len(self.losses) < self.max_tolerance_iters:
+            return False
+        else:
+            slope = self._compute_slope()
+            return slope > self.tolerance
 
     def optimize(self, save_transformed=False):
         fixed_arrays = self.fixed_images()
@@ -100,7 +132,7 @@ class AffineRegistration:
         transformed_images = [] if save_transformed else None
 
         for scale, iters in zip(self.scales, self.iterations):
-            self.convergence_monitor.reset()
+            self.losses.clear()
             size_down = [max(int(s / scale), 1) for s in fixed_size]
 
             if self.blur and scale > 1:
@@ -162,7 +194,7 @@ class AffineRegistration:
                 loss.backward()
                 self.optimizer.step()
 
-                if self.convergence_monitor.converged(loss.item()):
+                if self.converged(loss.item()):
                     break
 
                 if self.progress_bar:

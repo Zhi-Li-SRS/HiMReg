@@ -1,5 +1,3 @@
-from typing import Any, List, Optional, Union
-
 import numpy as np
 import SimpleITK as sitk
 import tifffile
