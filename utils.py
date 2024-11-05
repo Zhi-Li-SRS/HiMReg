@@ -42,11 +42,10 @@ def jacobian(u: torch.Tensor, normalize=True):
 
 def image_gradient_singlechannel(image, normalize=False):
     """
-    Compute the gradient of an image using central difference approximation
-    :param I: input image, represented as a [B,1,D,H,W] or [B,1,H,W] tensor
-    :returns: gradient of the input image, represented as a [B,C,D,H,W] or [B,C,H,W]  tensor
-
-    :TODO: Add support for multichannel images
+    Compute the gradient of an image using central difference approximation.
+    Args:
+        image: Image tensor of size [N, C, H, W] or [N, C, D, H, W]
+        normalize: default is False, if True, normalize the gradient by the image size
     """
     dims = len(image.shape) - 2
     device = image.device
@@ -186,17 +185,14 @@ def seperate_filter(x, kernels, mode=None):
     return x
 
 
-def downsample(
-    image,
-    size: List[int],
-    mode: str,
-    sigma: Optional[torch.Tensor] = None,
-    gaussians: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+def downsample(image, size, mode, sigma=None, gaussians=None) -> torch.Tensor:
     """
-    this function is to downsample the image to the given size
-    but first, we need to perform smoothing
-    if sigma is provided, then use this sigma for downsampling, otherwise infer sigma
+    this function is to downsample the image to the given size. If sigma is provided, then use this sigma for downsampling, otherwise infer sigma
+    Args:
+        image (tensor): input image
+        size (list): target size
+        mode (str): interpolation mode
+        sigma (list): sigma for gaussian filter
     """
     if gaussians is None:
         if sigma is None:
@@ -208,7 +204,6 @@ def downsample(
             sigma = sigma.clone().detach().to(dtype=torch.float32, device=image.device)
         else:
             sigma = torch.tensor(sigma, dtype=torch.float32, device=image.device)
-        # create gaussian convs
         gaussians = [gaussian_1d(s, truncated=2) for s in sigma]
     # otherwise gaussians is given, just downsample
     image_smooth = seperate_filter(image, gaussians)

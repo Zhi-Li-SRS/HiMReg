@@ -14,8 +14,8 @@ from diffeomorph import DiffRegistration
 class HiMReg:
     """Class for performing affine and diffeomorphic registration on a pair of images.
     Args:
-        fixed_images (BatchedImages): BatchedImages object of fixed images.
-        moving_images (BatchedImages): BatchedImages object of moving images.
+        fixed_images: Image object of fixed image.
+        moving_images: Image object of moving image.
         affine_scales (list): List of scales for affine registration.
         affine_iterations (list): List of iterations for affine registration.
         diff_scales (list): List of scales for diffeomorphic registration.

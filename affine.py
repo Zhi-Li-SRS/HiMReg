@@ -17,7 +17,7 @@ class AffineRegistration:
     def __init__(
         self,
         scales=[8, 6, 4, 2, 1],
-        iterations=[80, 600, 400, 200, 100],
+        iterations=[800, 600, 400, 200, 100],
         fixed_images=Image,
         moving_images=Image,
         loss_type="mi",
@@ -119,14 +119,14 @@ class AffineRegistration:
     def optimize(self, save_transformed=False):
         fixed_arrays = self.fixed_images()
         moving_arrays = self.moving_images()
-        fixed_t2p = self.fixed_images.get_torch2phy()
-        moving_p2t = self.moving_images.get_phy2torch()
+        fixed_t2p = self.fixed_images.get_pixel_to_physical()
+        moving_p2t = self.moving_images.get_physical_to_pixel()
         fixed_size = fixed_arrays.shape[2:]
         init_grid = (
             torch.eye(self.dims, self.dims + 1)
             .to(self.fixed_images.device)
             .unsqueeze(0)
-            .repeat(self.fixed_images.size(), 1, 1)
+            .repeat(self.fixed_images.size(), 1, 1)  # (B, self.dims, self.dims + 1)
         )
 
         transformed_images = [] if save_transformed else None
@@ -170,7 +170,7 @@ class AffineRegistration:
             )
             fixed_image_coords_homo = torch.einsum("ntd,n...d->n...t", fixed_t2p, fixed_image_coords_homo)
 
-            pbar = tqdm(range(iters)) if self.progress_bar else range(iters)
+            pbar = tqdm(range(iters))
             for i in pbar:
                 self.optimizer.zero_grad()
                 affinemat = self.get_affine_matrix()
@@ -197,8 +197,7 @@ class AffineRegistration:
                 if self.converged(loss.item()):
                     break
 
-                if self.progress_bar:
-                    pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
+                pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
 
             if save_transformed:
                 transformed_images.append(moved_image)
