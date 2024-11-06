@@ -5,6 +5,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy import ndimage
+from torchvision import transforms
 
 
 def jacobian_2d(u: torch.Tensor, normalize: bool):
@@ -76,139 +78,38 @@ def image_gradient_singlechannel(image, normalize=False):
     return grad
 
 
-def gaussian_1d(sigma: torch.Tensor, truncated=4.0, approx="erf", normalize=True):
+def gaussian_smooth(x, sigma) -> torch.Tensor:
     """
-    Compute 1D Gaussian kernel.
-
+    Apply Gaussian smoothing using scipy's gaussian filter
     Args:
-        sigma: Standard deviation of the Gaussian kernel.
-        truncated: Truncate the Gaussian kernel at this many standard deviations.
-        approx: Approximation method. Either "erf" or "exp".
-        normalize: Normalize the Gaussian kernel.
-
-    returns:
-        1D Gaussian kernel: torch.Tensor.
+        x: Input tensor
+        sigma: Standard deviation for Gaussian kernel
     """
-    device = sigma.device
-    sigma = torch.as_tensor(
-        sigma, dtype=torch.float, device=device if isinstance(sigma, torch.Tensor) else None
-    )
-    if truncated < 0.0:
-        raise ValueError("truncated must be positve")
-    tail = int(max(float(sigma) * truncated, 0.5) + 0.5)
-    if approx.lower() == "erf":
-        x = torch.arange(-tail, tail + 1, dtype=torch.float, device=device)
-        t = 0.70710678 / torch.abs(sigma)
-        out = 0.5 * ((t * (x + 0.5)).erf() - (t * (x - 0.5)).erf())
-        out = out.clamp(min=0)
-    elif approx.lower() == "sampled":
-        x = torch.arange(-tail, tail + 1, dtype=torch.float, device=device)
-        out = torch.exp(-0.5 / (sigma**2) * x**2)
-        if not normalize:
-            out = out / (2.5066282 * sigma)
-    else:
-        raise ValueError(f"Unknown approximation method: {approx}")
-
-    return out / out.sum() if normalize else out
-
-
-def make_regtangular_kernel(kernel_size):
-    """Create a rectangular kernel of size kernel_size."""
-    return torch.ones(kernel_size)
-
-
-def make_triangular_kernel(kernel_size):
-    """Create a triangular kernel of size kernel_size."""
-
-    size = (kernel_size + 1) // 2
-    if size % 2 == 0:
-        size -= 1
-    f = torch.ones((1, 1, size), dtype=torch.float).div(size)
-    padding = (kernel_size - size) // 2 + size // 2
-    return F.conv1d(f, f, padding=padding).reshape(-1)
-
-
-def make_gaussian_kernel(kernel_size, sigma):
-    """Create a Gaussian kernel of size kernel_size."""
-    sigma = torch.tensor(kernel_size / 3.0)
-    kernel = gaussian_1d(sigma, truncated=4.0, approx="erf", normalize=True) * (2.5066282 * sigma)
-
-    return kernel[:kernel_size]
-
-
-kernel_dict = {
-    "rectangular": make_regtangular_kernel,
-    "triangular": make_triangular_kernel,
-    "gaussian": make_gaussian_kernel,
-}
-
-
-def seperate_filter(x, kernels, mode=None):
-    """Seperate the filter into two 1D filters."""
-    if not isinstance(x, torch.Tensor):
-        raise ValueError("x must be a torch.Tensor")
-
-    spatial_dims = x.dim() - 2
-    if isinstance(kernels, torch.Tensor):
-        kernels = [kernels] * spatial_dims
-
-    _kernels = [s.to(x) for s in kernels]  # Convert to tensor
-    paddings = [(k.shape[0] - 1) // 2 for k in _kernels]
-    c = x.shape[1]
-    pad_mode = "constant" if mode is None else mode
-
-    for d in range(spatial_dims):
-        s = [1] * len(x.shape)
-        s[d + 2] = -1
-        _kernel = _kernels[d].reshape(s)
-        if _kernel.numel() == 1 and _kernel[0] == 1:
-            continue
-
-        _kernel = _kernel.repeat([c, 1] + [1] * spatial_dims)
-        padding = [0] * spatial_dims
-        padding[d] = paddings[d]
-        reversed_padding = padding[::-1]
-        reversed_padding_repeated_twice = [[p, p] for p in reversed_padding]
-        sum_reversed_padding_repeated_twice = []
-        for p in reversed_padding_repeated_twice:
-            sum_reversed_padding_repeated_twice.extend(p)
-
-        padded_input = F.pad(x, sum_reversed_padding_repeated_twice, mode=pad_mode)
-        if spatial_dims == 1:
-            x = F.conv1d(input=padded_input, weight=_kernel, groups=c)
-        elif spatial_dims == 2:
-            x = F.conv2d(input=padded_input, weight=_kernel, groups=c)
-        elif spatial_dims == 3:
-            x = F.conv3d(input=padded_input, weight=_kernel, groups=c)
-        else:
-            raise NotImplementedError(f"Unsupported spatial_dims: {spatial_dims}.")
-    return x
+    x_np = x.cpu().numpy()
+    x_smooth = ndimage.gaussian_filter(x_np, sigma)
+    return torch.from_numpy(x_smooth).to(x.device)
 
 
 def downsample(image, size, mode, sigma=None, gaussians=None) -> torch.Tensor:
     """
-    this function is to downsample the image to the given size. If sigma is provided, then use this sigma for downsampling, otherwise infer sigma
+    Downsample image using torchvision transforms
     Args:
-        image (tensor): input image
-        size (list): target size
-        mode (str): interpolation mode
-        sigma (list): sigma for gaussian filter
+        image: Input tensor [B, C, H, W] or [B, C, D, H, W]
+        size: Target size
+        mode: Interpolation mode
+        sigma: Optional sigma for Gaussian smoothing
     """
-    if gaussians is None:
-        if sigma is None:
-            orig_size = list(image.shape[2:])
-            sigma = [
-                0.5 * orig_size[i] / size[i] for i in range(len(orig_size))
-            ]  # use sigma as the downsampling factor
-        if isinstance(sigma, torch.Tensor):
-            sigma = sigma.clone().detach().to(dtype=torch.float32, device=image.device)
-        else:
-            sigma = torch.tensor(sigma, dtype=torch.float32, device=image.device)
-        gaussians = [gaussian_1d(s, truncated=2) for s in sigma]
-    # otherwise gaussians is given, just downsample
-    image_smooth = seperate_filter(image, gaussians)
-    image_down = F.interpolate(image_smooth, size=size, mode=mode, align_corners=True)
-    return image_down
+    if sigma is not None:
+        image = gaussian_smooth(image, sigma)
+
+    if len(image.shape) == 4:  # (B, C, H, W)
+        resize = transforms.Resize(
+            size=size, interpolation=getattr(transforms.InterpolationMode, mode.upper())
+        )
+        return resize(image)
+    else:  # 3D case
+        # Handle 3D case using F.interpolate since torchvision doesn't support 3D
+        return F.interpolate(image, size=size, mode=mode, align_corners=True)
 
 
 def scaling_and_squaring(u, grid, n=6):
@@ -272,7 +173,7 @@ def grad_smoothing_hook(grad: torch.Tensor, gaussians: List[torch.Tensor]):
     elif len(grad.shape) == 4:
         permute_vtoimg = (0, 3, 1, 2)
         permute_imgtov = (0, 2, 3, 1)
-    return seperate_filter(grad.permute(*permute_vtoimg), gaussians).permute(*permute_imgtov)
+    return gaussian_smooth(grad.permute(*permute_vtoimg), gaussians).permute(*permute_imgtov)
 
 
 def compute_inverse_warp_exp(warp, grid, lr=5e-3, iters=200, n=10):
