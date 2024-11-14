@@ -51,7 +51,6 @@ class DiffRegistration:
         self.blur = blur
         self.align_corners = align_corners
         self.loss_device = loss_device
-        self.convergence_monitor = ConvergenceMonitor(max_tolerance_iters, tolerance)
 
         # Initialize loss function
         if loss_type == "mi":
@@ -243,6 +242,10 @@ class CompositiveWarp(nn.Module):
         self.permute_imgtov = (0, *range(2, self.n_dims + 2), 1)
         self.permute_vtoimg = (0, self.n_dims + 1, *range(1, self.n_dims + 1))
         self.device = fixed_images.device
+
+        # Initialize CUDA for this device
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device.index)
 
         # define warp and register it as a parameter
         # define inverse warp and register it as a buffer

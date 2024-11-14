@@ -31,8 +31,7 @@ class Image:
         direction=None,
         origin=None,
     ) -> None:
-
-        self.device = device
+        self._device = device
         if isinstance(image_data, list):
             self.images = [
                 self._load_single_image(
@@ -64,7 +63,7 @@ class Image:
                 )
             ]
 
-        self.shape = self.images[0].shape
+        self._shape = self.images[0].shape  # Change to private attribute
         self.n_images = len(self.images)
         self.interpolate_mode = "bilinear" if self.images[0].dims == 2 else "trilinear"
 
@@ -79,7 +78,6 @@ class Image:
         spacing,
         direction,
         origin,
-        center,
     ):
         image = SingleImage(
             image_data,
@@ -91,7 +89,6 @@ class Image:
             spacing,
             direction,
             origin,
-            center,
         )
         return image
 
@@ -113,7 +110,15 @@ class Image:
     @property
     def device(self):
         """Get the device of the images."""
-        return self.images[0].device
+        return self._device
+
+    @device.setter
+    def device(self, value):
+        """Set the device of the images."""
+        self._device = value
+        if hasattr(self, "images"):
+            for image in self.images:
+                image.device = value
 
     @property
     def dims(self):
@@ -149,7 +154,7 @@ class Image:
     @property
     def shape(self):
         """Get the shape of the image array."""
-        return self.images[0].shape
+        return self._shape
 
 
 class SingleImage:
@@ -167,8 +172,7 @@ class SingleImage:
         direction=None,
         origin=None,
     ) -> None:
-
-        self.device = device
+        self._device = device  # Change to protected attribute
         if isinstance(image_data, str):
             self.load_from_file(image_data)
         elif isinstance(image_data, sitk.Image):
@@ -254,32 +258,50 @@ class SingleImage:
 
     def _init_transformations(self, spacing, direction, origin):
         """Initialize the transformation matrices."""
-        spacing = np.array(self.itk_image.GetSpacing())[None] if spacing is None else np.array(spacing)[None]
-        origin = np.array(self.itk_image.GetOrigin())[None] if origin is None else np.array(origin)[None]
-        direction = (
-            np.array(self.itk_image.GetDirection()).reshape(self.dims, self.dims)
-            if direction is None
-            else np.array(direction).reshape(self.dims, self.dims)
-        )
+        try:
+            spacing = (
+                np.array(self.itk_image.GetSpacing())[None] if spacing is None else np.array(spacing)[None]
+            )
+            origin = np.array(self.itk_image.GetOrigin())[None] if origin is None else np.array(origin)[None]
+            direction = (
+                np.array(self.itk_image.GetDirection()).reshape(self.dims, self.dims)
+                if direction is None
+                else np.array(direction).reshape(self.dims, self.dims)
+            )
 
-        pixel_to_physical = np.eye(self.dims + 1)
-        pixel_to_physical[: self.dims, -1] = origin  # define the parallel translation of the image
-        pixel_to_physical[: self.dims, : self.dims] = (
-            direction * spacing
-        )  # define the rotation and scaling of the image
+            pixel_to_physical = np.eye(self.dims + 1)
+            pixel_to_physical[: self.dims, -1] = origin
+            pixel_to_physical[: self.dims, : self.dims] = direction * spacing
 
-        physical_to_pixel = np.eye(self.dims + 1)
-        scaleterm = (np.array(self.itk_image.GetSize()) - 1) * 0.5
-        physical_to_pixel[: self.dims, : self.dims] = np.diag(scaleterm)
-        physical_to_pixel[: self.dims, -1] = scaleterm
+            physical_to_pixel = np.eye(self.dims + 1)
+            scaleterm = (np.array(self.itk_image.GetSize()) - 1) * 0.5
+            physical_to_pixel[: self.dims, : self.dims] = np.diag(scaleterm)
+            physical_to_pixel[: self.dims, -1] = scaleterm
 
-        self.pixel_to_physical = (
-            torch.from_numpy(np.matmul(pixel_to_physical, physical_to_pixel))
-            .to(self.device)
-            .float()
-            .unsqueeze(0)
-        )
-        self.physical_to_pixel = torch.inverse(self.pixel_to_physical[0]).float().unsqueeze(0)
+            # Convert to torch tensors on CPU first
+            pixel_to_physical = torch.from_numpy(np.matmul(pixel_to_physical, physical_to_pixel)).float()
+
+            # Calculate inverse on CPU
+            physical_to_pixel = torch.inverse(pixel_to_physical)
+
+            # Move to device and add batch dimension
+            self.pixel_to_physical = pixel_to_physical.to(self.device).unsqueeze(0)
+            self.physical_to_pixel = physical_to_pixel.to(self.device).unsqueeze(0)
+
+        except RuntimeError as e:
+            print(f"Warning: CUDA error in transformation initialization. Falling back to CPU. Error: {e}")
+            self.pixel_to_physical = torch.eye(self.dims + 1).float().unsqueeze(0)
+            self.physical_to_pixel = torch.eye(self.dims + 1).float().unsqueeze(0)
+
+    @property
+    def device(self):
+        return self._device
+
+    @device.setter
+    def device(self, value):
+        self._device = value
+        if hasattr(self, "array"):
+            self.array = self.array.to(value)
 
     @property
     def shape(self):

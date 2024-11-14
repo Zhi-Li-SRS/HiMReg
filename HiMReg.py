@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from affine import AffineRegistration
-from data_load import BatchedImages, Image
+from data_load import Image
 from diffeomorph import DiffRegistration
 
 
@@ -37,6 +37,11 @@ class HiMReg:
     ):
         self.fixed_images = fixed_images
         self.moving_images = moving_images
+        self.device = fixed_images.device
+
+        # Ensure device is set for all operations
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device.index)
 
         self.affine_registration = AffineRegistration(
             scales=affine_scales,
@@ -93,7 +98,7 @@ class HiMReg:
         affine_matrix = torch.from_numpy(affine_matrix).to(device)
 
         image = Image.load_file(image_path, device=device)
-        image_batch = BatchedImages(image)
+        image_batch = Image(image)
         transformed_image = F.affine_grid(affine_matrix[:, :image], image_batch().shape, aline_corners=True)
         transformed_image = F.grid_sample(
             image_batch(), transformed_image, mode="bilinear", align_corners=True
@@ -104,7 +109,7 @@ class HiMReg:
         deformation_field = np.load(deformation_path)
         deformation_field = torch.from_numpy(deformation_field).to(image.device)
         image = Image.load_file(image_path, device=device)
-        image_batch = BatchedImages(image)
+        image_batch = Image(image)
         transformed_image = F.grid_sample(
             image_batch(), deformation_field, mode="bilinear", align_corners=True
         )
@@ -128,7 +133,8 @@ def get_args():
 
 def main():
     args = get_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
 
     fixed_image = Image.load_file(args.fixed, device=device)
     moving_image = Image.load_file(args.moving, device=device)

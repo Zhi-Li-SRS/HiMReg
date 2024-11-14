@@ -27,7 +27,7 @@ class MutualInformation(nn.Module):
 
         super().__init__()
         if num_bins <= 0:
-            raise ValueError("num_bins must > 0, got {num_bins}")
+            raise ValueError(f"num_bins must > 0, got {num_bins}")
 
         self.kernel_type = kernel_type
         self.num_bins = num_bins
@@ -43,8 +43,14 @@ class MutualInformation(nn.Module):
         self.preterm = 1 / (2 * sigma**2)  # Preterm for Gaussian kernel
         self.register_buffer("bin_centers", bin_centers[None, None, ...])  # (1, 1, num_bins)
 
-    def estimate_prob_distribution(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-
+    def estimate_prob_distribution(self, img):
+        """
+        Estimate the probability distribution of the input image.
+        Args:
+            img (tensor): the input image.
+        Returns:
+            tuple [tensor, tensor]: the weight and probability of the input image.
+        """
         if self.kernel_type == "b-spline":
             return self.estimate_bspline_distribution(img, order=3)
         elif self.kernel_type == "gaussian":
@@ -52,9 +58,15 @@ class MutualInformation(nn.Module):
         else:
             raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
 
-    def estimate_bspline_distribution(
-        self, img: torch.Tensor, order: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def estimate_bspline_distribution(self, img, order):
+        """
+        Estimate the probability distribution of the input image using b-spline.
+        Args:
+            img (tensor): the input image.
+            order (int): the order of b-spline.
+        Returns:
+            tuple [tensor, tensor]: the weight and probability of the input image.
+        """
 
         max, min = torch.max(img), torch.min(img)
         padding = 2
@@ -85,7 +97,14 @@ class MutualInformation(nn.Module):
         probability = torch.mean(weight, dim=-2, keepdim=True)  # (batch, 1, num_bins)
         return weight, probability
 
-    def estimate_gaussian_distribution(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def estimate_gaussian_distribution(self, img):
+        """
+        Estimate the probability distribution of the input image using Gaussian kernel.
+        Args:
+            img (tensor): the input image.
+        Returns:
+            tuple [tensor, tensor]: the weight and probability of the input image.
+        """
         img = torch.clamp(img, 0, 1)
         img = img.reshape(img.shape[0], -1, 1)  # (batch, num_sample, 1)
         weight = torch.exp(
@@ -95,7 +114,11 @@ class MutualInformation(nn.Module):
         probability = torch.mean(weight, dim=-2, keepdim=True)  # (batch, 1, num_bin)
         return weight, probability
 
-    def forward(self, pred, target) -> torch.Tensor:
+    def forward(self, pred, target):
+        """
+        Compute the mutual information between pred and target (fixed) image)
+
+        """
         if target.shape != pred.shape:
             raise ValueError(f"Target shape {target.shape} differs from pred shape {pred.shape}")
 
@@ -162,9 +185,7 @@ class LNCC(nn.Module):
             vol = torch.matmul(vol.unsqueeze(-1), self.kernel.unsqueeze(0))
         return vol, torch.sum(vol)
 
-    def forward(
-        self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask=None) -> torch.Tensor:
         """
         Args:
             pred: the shape should be BNH[WD].
