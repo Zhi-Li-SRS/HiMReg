@@ -31,7 +31,6 @@ class AffineRegistration:
         tolerance=1e-6,
         max_tolerance_iters=1000,
         init_rigid=None,
-        custom_loss=None,
         blur=True,
         align_corners=True,
         moved_mask=False,
@@ -61,8 +60,6 @@ class AffineRegistration:
                 kernel_type=cc_kernel_type, spatial_dims=self.dims, kernel_size=cc_kernel_size, **loss_params
             )
 
-        elif loss_type == "custom":
-            self.loss_fn = custom_loss
         else:
             raise ValueError(f"Loss type {loss_type} not supported")
 

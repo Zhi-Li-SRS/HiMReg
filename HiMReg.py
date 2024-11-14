@@ -39,7 +39,6 @@ class HiMReg:
         self.moving_images = moving_images
         self.device = fixed_images.device
 
-        # Ensure device is set for all operations
         if self.device.type == "cuda":
             torch.cuda.set_device(self.device.index)
 
