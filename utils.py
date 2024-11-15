@@ -157,7 +157,7 @@ def downsample(image, size, mode, sigma=None):
             0.5 * orig_size[i] / size[i] for i in range(len(orig_size))
         ]  # use sigma as the downsampling factor
 
-    sigma = torch.tensor(sigma, dtype=torch.float32, device=image.device)
+    sigma = torch.as_tensor(sigma, dtype=torch.float32, device=image.device)
     kernels = [gaussian_1d(s, truncated=2) for s in sigma]
     smoothed = seperate_filter(image, kernels)
     image_down = F.interpolate(smoothed, size=size, mode=mode, align_corners=True)
@@ -227,14 +227,26 @@ def grad_smoothing_hook(grad, gaussians):
     return seperate_filter(grad.permute(*permute_vtoimg), gaussians).permute(*permute_imgtov)
 
 
-def compute_inverse_warp_exp(warp, grid, lr=5e-3, iters=200, n=10):
-    """compute warp inverse using exponential map"""
+def compute_inverse_warp_exp(warp, grid, lr=4e-3, iterations=300, n=10):
+    """
+    compute warp inverse using exponential map
+
+    Args:
+        warp (torch.Tensor): The original deformation field to be inverted
+        grid (torch.Tensor): The grid for the original deformation field
+        lr (float): learning rate
+        iters (int): number of iterations
+        n (int): number of scaling and squaring iterations
+    """
     with torch.set_grad_enabled(True):
         vel = nn.Parameter(torch.zeros_like(warp))
         optim = torch.optim.Adam([vel], lr=lr)
-        permute_vtoimg = (0, 4, 1, 2, 3) if len(warp.shape) == 5 else (0, 3, 1, 2)
-        permute_imgtov = (0, 2, 3, 4, 1) if len(warp.shape) == 5 else (0, 2, 3, 1)
-        pbar = range(iters)
+
+        is_2d = len(warp.shape) == 4
+        permute_vtoimg = (0, 3, 1, 2) if is_2d else (0, 4, 1, 2, 3)
+        permute_imgtov = (0, 2, 3, 1) if is_2d else (0, 2, 3, 4, 1)
+
+        pbar = range(iterations)
         for i in pbar:
             optim.zero_grad()
             invwarp = scaling_and_squaring(vel, grid, n=n)
@@ -254,8 +266,9 @@ def compute_inverse_warp_displacement(warp, grid, initial_inverse=None, iters=20
     """
     Compute the inverse warp using a given warp, grid and optional initialization
     """
-    permute_vtoimg = (0, 4, 1, 2, 3) if len(warp.shape) == 5 else (0, 3, 1, 2)
-    permute_imgtov = (0, 2, 3, 4, 1) if len(warp.shape) == 5 else (0, 2, 3, 1)
+    is_2d = len(warp.shape) == 4
+    permute_vtoimg = (0, 3, 1, 2) if is_2d else (0, 4, 1, 2, 3)
+    permute_imgtov = (0, 2, 3, 1) if is_2d else (0, 2, 3, 4, 1)
     # in case this block is being called within a no_grad block
     with torch.set_grad_enabled(True):
         if initial_inverse is None:

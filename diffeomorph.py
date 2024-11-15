@@ -33,7 +33,6 @@ class DiffRegistration:
         tolerance=1e-6,
         max_tolerance_iters=1000,
         init_affine=None,
-        custom_loss=None,
         blur=True,
         align_corners=True,
         loss_device=None,
@@ -47,6 +46,7 @@ class DiffRegistration:
         self.moving_images = moving_images
         self.device = fixed_images.device
         self.dims = fixed_images.dims
+        self.tolerance = tolerance
         self.progress_bar = progress_bar
         self.blur = blur
         self.align_corners = align_corners
@@ -59,9 +59,6 @@ class DiffRegistration:
             self.loss_fn = LNCC(
                 kernel_type=cc_kernel_type, spatial_dims=self.dims, kernel_size=cc_kernel_size, **loss_params
             )
-
-        elif loss_type == "custom":
-            self.loss_fn = custom_loss
         else:
             raise ValueError(f"Loss type {loss_type} not supported")
 
@@ -136,6 +133,36 @@ class DiffRegistration:
         grad = torch.gradient(warp_field, dim=(1, 2, 3))
         grad_norm = sum(torch.sum(g**2) for g in grad)
         return grad_norm
+
+    def _compute_slope(self):
+        """Compute the slope of the best-fit line using simple linear regression."""
+        if len(self.losses) < 2:
+            return 0
+
+        x = np.arange(len(self.losses))
+        y = np.array(self.losses)
+
+        xy_sum = np.dot(x, y)
+        x_sum = x.sum()
+        y_sum = y.sum()
+        x_squared_sum = (x**2).sum()
+        N = len(self.losses)
+
+        numerator = N * xy_sum - x_sum * y_sum
+        denominator = N * x_squared_sum - x_sum**2
+        if denominator == 0:
+            return 0
+        slope = numerator / denominator
+        return slope
+
+    def converged(self, loss):
+        """Check if the loss has increased (i.e., slope > threshold)."""
+        self.losses.append(loss)
+        if len(self.losses) < self.max_tolerance_iters:
+            return False
+        else:
+            slope = self._compute_slope()
+            return slope > self.tolerance
 
     def optimize(self, save_transformed=False):
         fixed_arrays = self.fixed_images()
@@ -347,7 +374,6 @@ class CompositiveWarp(nn.Module):
 
 
 class WarpAdam:
-
     def __init__(
         self,
         warp,

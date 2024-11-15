@@ -31,7 +31,7 @@ class Image:
         direction=None,
         origin=None,
     ) -> None:
-        self._device = device
+        self._device = device if isinstance(device, torch.device) else torch.device(device)
         if isinstance(image_data, list):
             self.images = [
                 self._load_single_image(
@@ -296,12 +296,6 @@ class SingleImage:
     @property
     def device(self):
         return self._device
-
-    @device.setter
-    def device(self, value):
-        self._device = value
-        if hasattr(self, "array"):
-            self.array = self.array.to(value)
 
     @property
     def shape(self):

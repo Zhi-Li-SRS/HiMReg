@@ -39,9 +39,6 @@ class HiMReg:
         self.moving_images = moving_images
         self.device = fixed_images.device
 
-        if self.device.type == "cuda":
-            torch.cuda.set_device(self.device.index)
-
         self.affine_registration = AffineRegistration(
             scales=affine_scales,
             iterations=affine_iterations,
