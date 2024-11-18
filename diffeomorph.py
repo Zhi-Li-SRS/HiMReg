@@ -36,7 +36,6 @@ class DiffRegistration:
         blur=True,
         align_corners=True,
         loss_device=None,
-        progress_bar=True,
     ):
         self.scales = scales
         self.iterations = iterations
@@ -47,7 +46,6 @@ class DiffRegistration:
         self.device = fixed_images.device
         self.dims = fixed_images.dims
         self.tolerance = tolerance
-        self.progress_bar = progress_bar
         self.blur = blur
         self.align_corners = align_corners
         self.loss_device = loss_device
@@ -246,7 +244,6 @@ class DiffRegistration:
 class CompositiveWarp(nn.Module):
     """
     Class for compositive warp function (collects gradients of dL/dp)
-    The image is computed as M \circ (\phi + u)
     """
 
     def __init__(
@@ -269,10 +266,6 @@ class CompositiveWarp(nn.Module):
         self.permute_imgtov = (0, *range(2, self.n_dims + 2), 1)
         self.permute_vtoimg = (0, self.n_dims + 1, *range(1, self.n_dims + 1))
         self.device = fixed_images.device
-
-        # Initialize CUDA for this device
-        if self.device.type == "cuda":
-            torch.cuda.set_device(self.device.index)
 
         # define warp and register it as a parameter
         # define inverse warp and register it as a buffer
@@ -315,7 +308,7 @@ class CompositiveWarp(nn.Module):
             oparams["warpinv"] = self.inv
         # add optimizer
         optimizer = optimizer.lower()
-        self.optimizer = WarpAdam(self.warp, lr=optimizer_lr, **oparams)
+        self.optimizer = DiffAdam(self.warp, lr=optimizer_lr, **oparams)
 
     def attach_grad_hook(self):
         """attack the grad hook to the velocity field if needed"""
@@ -373,7 +366,24 @@ class CompositiveWarp(nn.Module):
         self.initialize_grid()
 
 
-class WarpAdam:
+class DiffAdam:
+    """
+    Adam like optimizer specialized for diffeomorphic registration
+
+    Args:
+        Warp (Tensor): The warp field to optimize
+        lr (float): learning rate
+        warpinv (Tensor, optional): The inverse warp field to optimize. Defaults to None
+        beta1 (float): Exponential decay rate for first moment. Defaults to 0.9
+        beta2 (float): Exponential decay rate for second moment. Defaults to 0.99
+        weight_decay (float): Weight decay factor. Defaults to 0
+        eps (float): Term added for numerical stability. Defaults to 1e-8
+        scaledown (bool): Whether to scale gradients even when norm is below 1
+        multiply_jacobian (bool): Whether to multiply gradients with Jacobian
+        smoothing_gaussians (Tensor, optional): Gaussian kernels for smoothing
+        optimize_inverse_warp (bool): Whether to optimize inverse warping field
+    """
+
     def __init__(
         self,
         warp,
@@ -388,82 +398,103 @@ class WarpAdam:
         smoothing_gaussians=None,
         optimize_inverse_warp=False,
     ):
-        # init
-        if beta1 < 0.0 or beta1 >= 1.0:
-            raise ValueError("Invalid beta1 value: {}".format(beta1))
-        if beta2 < 0.0 or beta2 >= 1.0:
-            raise ValueError("Invalid beta2 value: {}".format(beta2))
-        if weight_decay < 0.0:
-            raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
-        if lr < 0.0:
-            raise ValueError("Invalid lr value: {}".format(lr))
+
+        # initialize basic parameters
         self.n_dims = len(warp.shape) - 2
-        # get half resolutions
+        self.batch_size = warp.shape[0]
         self.half_resolution = 1.0 / (max(warp.shape[1:-1]) - 1)
+
+        # initialize optimizer parameters
         self.warp = warp
         self.warpinv = warpinv
-        self.optimize_inverse_warp = optimize_inverse_warp
         self.lr = lr
         self.eps = eps
         self.beta1 = beta1
         self.beta2 = beta2
-        self.step_t = 0  # initialize step to 0
         self.weight_decay = weight_decay
+
+        # initialize optimizer states
+        self.step_t = 0  # initialize step to 0
+        self.exp_avg = torch.zeros_like(warp)  # initialize first moment
+        self.exp_avg_sq = torch.zeros_like(warp)  # initialize second moment
+
+        # initialize additional parameters
         self.multiply_jacobian = multiply_jacobian
-        self.scaledown = scaledown  # if true, the scale the gradient even if norm is below 1
-        self.exp_avg = torch.zeros_like(warp)
-        self.exp_avg_sq = torch.zeros_like(warp)
-        self.permute_imgtov = (
-            0,
-            *range(2, self.n_dims + 2),
-            1,
-        )  # [N, HWD, dims] -> [N, HWD, dims] -> [N, dims, HWD]
-        self.permute_vtoimg = (
-            0,
-            self.n_dims + 1,
-            *range(1, self.n_dims + 1),
-        )  # [N, dims, HWD] -> [N, HWD, dims]
-        # set grid
-        self.batch_size = batch_size = warp.shape[0]
-        # init grid
-        self.affine_init = torch.eye(self.n_dims, self.n_dims + 1, device=warp.device)[None].expand(
-            batch_size, -1, -1
-        )
-        self.initialize_grid(warp.shape[1:-1])
-        # gaussian smoothing parameters (if any)
+        self.scaledown = scaledown
+        self.optimize_inverse_warp = optimize_inverse_warp
         self.smoothing_gaussians = smoothing_gaussians
 
-    def set_data_and_size(self, warp, size, grid_copy=None, warpinv=None):
-        """change the optimization variables sizes"""
-        self.warp = warp
-        mode = "bilinear" if self.n_dims == 2 else "trilinear"
-        self.exp_avg = F.interpolate(
-            self.exp_avg.detach().permute(*self.permute_vtoimg), size=size, mode=mode, align_corners=True
-        ).permute(*self.permute_imgtov)
-        self.exp_avg_sq = F.interpolate(
-            self.exp_avg_sq.detach().permute(*self.permute_vtoimg), size=size, mode=mode, align_corners=True
-        ).permute(*self.permute_imgtov)
-        self.half_resolution = 1.0 / (max(warp.shape[1:-1]) - 1)
-        self.initialize_grid(size, grid_copy=grid_copy)
-        # print(self.warp.shape, warpinv)
-        if self.optimize_inverse_warp and warpinv is not None:
-            self.warpinv = warpinv
+        self.setup_permutation_indices()
+        self.initialize_transformation_grid()
 
-    def initialize_grid(self, size, grid_copy=None):
-        """initialize the grid (so that we can use it independent of the grid elsewhere)"""
-        if grid_copy is None:
-            self.grid = F.affine_grid(
-                self.affine_init, [self.batch_size, 1, *size], align_corners=True
-            ).detach()
-        else:
-            self.grid = grid_copy
+    def setup_permutation_indices(self):
+        # [N, HWD, dims] -> [N, dims, HWD]
+        self.permute_imgtov = (0, *range(2, self.n_dims + 2), 1)
+        # [N, dims, HWD] -> [N, HWD, dims]
+        self.permute_vtoimg = (0, self.n_dims + 1, *range(1, self.n_dims + 1))
+
+    def initialize_transformation_grid(self):
+        """Initialize the transformation grid"""
+        self.affine_init = torch.eye(self.n_dims, self.n_dims + 1, device=self.warp.device)[None].expand(
+            self.batch_size, -1, -1
+        )
+        self.grid = F.affine_grid(
+            self.affine_init, [self.batch_size, 1, *self.warp.shape[1:-1]], align_corners=True
+        ).detach()
+
+    def compute_moments(self, grad):
+        """Compute the moments of the gradient"""
+        self.step_t += 1
+
+        # Update biased first moment estimate
+        self.exp_avg.mul_(self.beta1).add_(grad, alpha=1 - self.beta1)
+        # Update biased second raw moment estimate
+        self.exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad.conj(), value=1 - self.beta2)
+
+        bias_correction1 = 1 - self.beta1**self.step_t
+        bias_correction2 = 1 - self.beta2**self.step_t
+        denom = (self.exp_avg_sq / bias_correction2).sqrt().add_(self.eps)
+
+        return self.exp_avg / bias_correction1 / denom
+
+    def normalize_gradient(self, grad):
+        gradmax = self.eps + grad.norm(p=2, dim=-1, keepdim=True).flatten(1).max(1).values
+        gradmax = gradmax.reshape(-1, *([1]) * (self.n_dims + 1))
+
+        if not self.scaledown:
+            gradmax = torch.clamp(gradmax, min=1)
+
+        return grad / gradmax * self.half_resolution
+
+    def update_warp_field(self, grad):
+        """Update warp field using compositional update."""
+
+        w = grad + F.grid_sample(
+            self.warp.data.permute(*self.permute_vtoimg),
+            self.grid + grad,
+            mode="bilinear",
+            align_corners=True,
+        ).permute(*self.permute_imgtov)
+
+        if self.smoothing_gaussians is not None:
+            w = seperate_filter(w.permute(*self.permute_vtoimg), self.smoothing_gaussians).permute(
+                *self.permute_imgtov
+            )
+        return w
+
+    def optimize_inverse_warp(self, w):
+        """Optimize the inverse warp field."""
+        if self.optimize_inverse_warp and self.warpinv is not None:
+            invwarp = compute_inverse_warp_displacement(self.warp.data, self.grid, self.warpinv.data, iters=5)
+            warp_new = compute_inverse_warp_displacement(invwarp, self.grid, self.warp.data, iters=5)
+            return warp_new, invwarp
+        return w, None
 
     def zero_grad(self):
-        """set the gradient to none"""
+        """Clear gradients."""
         self.warp.grad = None
 
     def augment_jacobian(self, u):
-        # Multiply u (which represents dL/dphi most likely) with Jacobian indexed by J[..., xyz, ..., phi]
         jac = jacobian(self.warp.data + self.grid, normalize=True)  # [B, dims, H, W, [D], dims]
         if self.n_dims == 2:
             ujac = torch.einsum("bxhwp,bhwp->bhwx", jac, u)
@@ -472,51 +503,27 @@ class WarpAdam:
         return ujac
 
     def step(self):
-        """check for momentum, and other things"""
+        """Perform a single optimization step.
+
+        Updates the warp field using a compositional update rule while
+        maintaining momentum and adaptive learning rates from Adam.
+        """
         grad = torch.clone(self.warp.grad.data).detach()
+
         if self.multiply_jacobian:
             grad = self.augment_jacobian(grad)
-        # add weight decay term
+
         if self.weight_decay > 0:
             grad.add_(self.warp.data, alpha=self.weight_decay)
-        # compute moments
-        self.step_t += 1
-        self.exp_avg.mul_(self.beta1).add_(grad, alpha=1 - self.beta1)
-        self.exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad.conj(), value=1 - self.beta2)
-        # bias correction
-        beta_correction1 = 1 - self.beta1**self.step_t
-        beta_correction2 = 1 - self.beta2**self.step_t
-        denom = (self.exp_avg_sq / beta_correction2).sqrt().add_(self.eps)
-        # get updated gradient (this will be normalized and passed in)
-        grad = self.exp_avg / beta_correction1 / denom
-        # renormalize and update warp
-        # gradmax = self.eps + grad.reshape(grad.shape[0], -1).abs().max(1).values  # [B,]
-        gradmax = self.eps + grad.norm(p=2, dim=-1, keepdim=True).flatten(1).max(1).values
-        gradmax = gradmax.reshape(-1, *([1]) * (self.n_dims + 1))
-        if not self.scaledown:  # if scaledown is "True", then we scale down even if the norm is below 1
-            gradmax = torch.clamp(gradmax, min=1)
-        # print(gradmax.abs().min(), gradmax.abs().max())
-        grad = grad / gradmax * self.half_resolution  # norm is now 0.5r
-        # multiply by learning rate
+
+        grad = self.compute_moments(grad)
+        grad = self.normalize_gradient(grad)
         grad.mul_(-self.lr)
-        # print(grad.abs().max().item(), self.half_resolution, self.warp.shape)
-        # compositional update
-        w = grad + F.grid_sample(
-            self.warp.data.permute(*self.permute_vtoimg),
-            self.grid + grad,
-            mode="bilinear",
-            align_corners=True,
-        ).permute(*self.permute_imgtov)
-        # w = grad + self.warp.data
-        # smooth result if asked for
-        if self.smoothing_gaussians is not None:
-            w = seperate_filter(w.permute(*self.permute_vtoimg), self.smoothing_gaussians).permute(
-                *self.permute_imgtov
-            )
+        w = self.update_warp_field(grad)
+
+        w, invwarp = self.optimize_inverse_warp(w)
+
+        # Update parameters
         self.warp.data.copy_(w)
-        # add to inverse if exists
-        if self.optimize_inverse_warp and self.warpinv is not None:
-            invwarp = compute_inverse_warp_displacement(self.warp.data, self.grid, self.warpinv.data, iters=5)
-            warp_new = compute_inverse_warp_displacement(invwarp, self.grid, self.warp.data, iters=5)
-            self.warp.data.copy_(warp_new)
+        if invwarp is not None:
             self.warpinv.data.copy_(invwarp)

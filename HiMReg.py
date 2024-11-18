@@ -129,8 +129,8 @@ def get_args():
 
 def main():
     args = get_args()
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
 
     fixed_image = Image.load_file(args.fixed, device=device)
     moving_image = Image.load_file(args.moving, device=device)
