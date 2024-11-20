@@ -1,5 +1,5 @@
 from collections import deque
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -21,7 +21,6 @@ class AffineRegistration:
         fixed_images=Image,
         moving_images=Image,
         loss_type="mi",
-        optimizer="Adam",
         optimizer_params={},
         loss_params={},
         optimizer_lr=3e-3,
@@ -36,10 +35,12 @@ class AffineRegistration:
         moved_mask=False,
     ):
 
+        # Validate input params
+        self.validate_inputs(scales, iterations)
+
+        # Set basic params
         self.scales = scales
         self.iterations = iterations
-        assert len(self.iterations) == len(self.scales), "Number of iterations must match number of scales"
-
         self.fixed_images = fixed_images
         self.moving_images = moving_images
         self.device = fixed_images.device
@@ -48,37 +49,45 @@ class AffineRegistration:
         self.align_corners = align_corners
         self.moved_mask = moved_mask
 
+        # Set onvergence params
         self.tolerance = tolerance
         self.max_tolerance_iters = max_tolerance_iters
         self.losses = deque(maxlen=max_tolerance_iters)
 
         # Initialize loss function
+        self._init_loss_function(loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params)
+        self.init_affine_params(init_rigid)
+        self.optimizer = Adam([self.affine], lr=optimizer_lr, **optimizer_params)
+
+        # Initialize final transformation matrix
+        self.final_affine_matrix = None
+
+    def validate_inputs(self, scales, iterations):
+        """Validate input parameters."""
+        if len(iterations) != len(scales):
+            raise ValueError("Number of iterations must match number of scales")
+
+    def _init_loss_function(self, loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params):
+        """Initialize loss function."""
         if loss_type == "mi":
             self.loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
         elif loss_type == "cc":
             self.loss_fn = LNCC(
                 kernel_type=cc_kernel_type, spatial_dims=self.dims, kernel_size=cc_kernel_size, **loss_params
             )
-
         else:
             raise ValueError(f"Loss type {loss_type} not supported")
 
-        # Initialize affine parameters
+    def init_affine_params(self, init_rigid: Optional[torch.Tensor]) -> None:
+        """Initialize affine transformation parameters."""
         if init_rigid is not None:
             affine = init_rigid
         else:
-            affine = torch.eye(self.dims, self.dims + 1).unsqueeze(0).repeat(fixed_images.size(), 1, 1)
-        self.affine = nn.Parameter(affine.to(self.device))
-        self.row = torch.zeros((fixed_images.size(), 1, self.dims + 1), device=self.device)
-        self.row[:, 0, -1] = 1  # （batch, 1, self.dims + 1）but last element is 1s
+            affine = torch.eye(self.dims, self.dims + 1).unsqueeze(0).repeat(self.fixed_images.size(), 1, 1)
 
-        # Initialize optimizer
-        if optimizer == "SGD":
-            self.optimizer = SGD([self.affine], lr=optimizer_lr, **optimizer_params)
-        elif optimizer == "Adam":
-            self.optimizer = Adam([self.affine], lr=optimizer_lr, **optimizer_params)
-        else:
-            raise ValueError(f"Optimizer {optimizer} not supported")
+        self.affine = nn.Parameter(affine.to(self.device))
+        self.row = torch.zeros((self.fixed_images.size(), 1, self.dims + 1), device=self.device)
+        self.row[:, 0, -1] = 1
 
     def get_affine_matrix(self):
         return torch.cat([self.affine, self.row], dim=1)
@@ -113,6 +122,35 @@ class AffineRegistration:
             slope = self._compute_slope()
             return slope > self.tolerance
 
+    def prepare_images_for_scale(
+        self, fixed_arrays: torch.Tensor, moving_arrays: torch.Tensor, size_down: List[int], scale: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Prepare images for current scale level."""
+        if self.blur and scale > 1:
+            sigmas = 0.5 * torch.tensor(
+                [sz / szdown for sz, szdown in zip(fixed_arrays.shape[2:], size_down)],
+                device=fixed_arrays.device,
+            )
+            fixed_image_down = downsample(
+                fixed_arrays, size=size_down, mode=self.fixed_images.interpolate_mode, sigma=sigmas
+            )
+            moving_image_blur = downsample(
+                moving_arrays,
+                size=moving_arrays.shape[2:],
+                mode=self.moving_images.interpolate_mode,
+                sigma=sigmas,
+            )
+        else:
+            fixed_image_down = F.interpolate(
+                fixed_arrays,
+                size=size_down,
+                mode=self.fixed_images.interpolate_mode,
+                align_corners=self.align_corners,
+            )
+            moving_image_blur = moving_arrays
+
+        return fixed_image_down, moving_image_blur
+
     def optimize(self, save_transformed=False):
         fixed_arrays = self.fixed_images()
         moving_arrays = self.moving_images()
@@ -128,31 +166,17 @@ class AffineRegistration:
 
         transformed_images = [] if save_transformed else None
 
+        # Initialize cumulative transformation
+        self.final_affine_matrix = torch.matmul(moving_p2t, torch.matmul(self.get_affine_matrix(), fixed_t2p))
+
+        # Hierarchical optimization
         for scale, iters in zip(self.scales, self.iterations):
             self.losses.clear()
             size_down = [max(int(s / scale), 1) for s in fixed_size]
 
-            if self.blur and scale > 1:
-                sigmas = 0.5 * torch.tensor(
-                    [sz / szdown for sz, szdown in zip(fixed_size, size_down)], device=fixed_arrays.device
-                )
-                fixed_image_down = downsample(
-                    fixed_arrays, size=size_down, mode=self.fixed_images.interpolate_mode, sigma=sigmas
-                )
-                moving_image_blur = downsample(
-                    moving_arrays,
-                    size=moving_arrays.shape[2:],
-                    mode=self.moving_images.interpolate_mode,
-                    sigma=sigmas,
-                )
-            else:
-                fixed_image_down = F.interpolate(
-                    fixed_arrays,
-                    size=size_down,
-                    mode=self.fixed_images.interpolate_mode,
-                    align_corners=self.align_corners,
-                )
-                moving_image_blur = moving_arrays
+            fixed_image_down, moving_image_blur = self.prepare_images_for_scale(
+                fixed_arrays, moving_arrays, size_down, scale
+            )
 
             fixed_image_coords = F.affine_grid(
                 init_grid, fixed_image_down.shape, align_corners=self.align_corners
@@ -197,7 +221,25 @@ class AffineRegistration:
                 pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
 
             if save_transformed:
-                transformed_images.append(moved_image)
+                transformed_images.append(moved_image.detach().cpu())
 
-        if save_transformed:
-            return transformed_images
+            # Update cumulative transformation after each scale
+            current_matrix = torch.matmul(moving_p2t, torch.matmul(self.get_affine_matrix(), fixed_t2p))
+            self.final_affine_matrix = current_matrix
+
+        return transformed_images if save_transformed else None
+
+    def get_final_transform(self):
+        """Get the final affine transformation matrix."""
+        if self.final_affine_matrix is None:
+            raise RuntimeError("Final transformation matrix not computed. Run optimize() first.")
+        return self.final_affine_matrix
+
+    def apply_transform(self, moving_image):
+        """Apply the final transformation to a new image."""
+        if self.final_affine_matrix is None:
+            raise RuntimeError("Final transformation matrix not computed. Run optimize() first.")
+
+        grid = F.affine_grid(self.final_affine_matrix[:, :-1], moving_image.shape, align_corners=True)
+        transformed = F.grid_sample(moving_image, grid, mode="bilinear", align_corners=True)
+        return transformed

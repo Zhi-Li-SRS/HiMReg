@@ -55,61 +55,33 @@ class HiMReg:
             **diff_kwargs,
         )
 
-    def register(self, save_transformed=False):
+    def register(self, save_transformed=True):
+        """
+        Perform registration of the moving image to the fixed image.
+
+        Args:
+            save_transformed (bool): Whether to save transformed images during optimization.
+        Returns:
+            tuple: (transformed_images, final_coordinates)
+        """
 
         affine_transformed = self.affine_registration.optimize(save_transformed=save_transformed)
 
-        affine_matrix = self.affine_registration.get_affine_matrix()
+        affine_matrix = self.affine_registration.get_final_transform()
 
         self.diff_registration.init_affine = affine_matrix
         diff_transformed = self.diff_registration.optimize(save_transformed=save_transformed)
 
-        if save_transformed:
-            return affine_transformed, diff_transformed
-        else:
-            return None
+        final_coordinates = None
+        final_coordinates = self.diff_registration.get_final_coordinates()
 
-    def get_final_transformation(self):
-        final_warp = self.diff_registration.get_warped_coordinates(self.fixed_images, self.moving_images)
-        return final_warp
+        return diff_transformed, final_coordinates
 
-    def apply_transformation(self, image: torch.Tensor):
-        moved_coords = self.get_final_transformation()
-        transformed_image = torch.nn.functional.grid_sample(
-            image, moved_coords, mode="bilinear", align_corners=True
-        )
-        return transformed_image
-
-    def save_affine_matrix(self, output_path):
-        affine_matrix = self.affine_registration.get_affine_matrix().detach().cpu().numpy()
-        np.save(output_path, affine_matrix)
-
-    # def save_deformation_field(self, output_path):
-    #     deformation_field = self.diff_registration.get_warped_coordinates().detach().cpu().numpy()
-    #     np.save(output_path, deformation_field)
-
-    def apply_affine(self, image_path, matrix_path, device="cuda"):
-        """Apply affine transformation to an image."""
-        affine_matrix = np.load(matrix_path)
-        affine_matrix = torch.from_numpy(affine_matrix).to(device)
-
-        image = Image.load_file(image_path, device=device)
-        image_batch = Image(image)
-        transformed_image = F.affine_grid(affine_matrix[:, :image], image_batch().shape, aline_corners=True)
-        transformed_image = F.grid_sample(
-            image_batch(), transformed_image, mode="bilinear", align_corners=True
-        )
-        return transformed_image
-
-    def apply_diff(self, image_path, deformation_path: str, device="cuda"):
-        deformation_field = np.load(deformation_path)
-        deformation_field = torch.from_numpy(deformation_field).to(image.device)
-        image = Image.load_file(image_path, device=device)
-        image_batch = Image(image)
-        transformed_image = F.grid_sample(
-            image_batch(), deformation_field, mode="bilinear", align_corners=True
-        )
-        return transformed_image
+    @staticmethod
+    def apply_transformation(image: torch.Tensor, coords_path: str, device: str):
+        coords = torch.from_numpy(np.load(coords_path)).to(device).float()
+        transformed = F.grid_sample(image, coords, mode="bilinear", align_corners=True)
+        return transformed
 
 
 def get_args():
@@ -119,10 +91,10 @@ def get_args():
         "--moving", type=str, default="data/D385_7A2/lipid_unsat_roi1.tif", help="Path to moving image"
     )
     parser.add_argument("--output", type=str, default="pred", help="Output directory")
-    parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4])
-    parser.add_argument("--affine_iterations", nargs="+", type=int, default=[800, 600, 400])
-    parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4])
-    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400])
+    parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
+    parser.add_argument("--affine_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
+    parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
+    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
     parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
     return parser.parse_args()
 
@@ -149,35 +121,25 @@ def main():
     transformed_images = registration.register(save_transformed=True)
 
     if transformed_images:
-        affine_transformed, diff_transformed = transformed_images
+        diff_transformed, final_coordinates = transformed_images
 
         # Create the output directory
         moving_dir, moving_filename = os.path.split(args.moving)
         moving_basename = os.path.splitext(moving_filename)[0]
         relative_path = os.path.relpath(moving_dir, start=os.path.dirname(moving_dir))
 
-        affine_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_affine.tif")
+        # affine_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_affine.tif")
         diff_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_diff.tif")
-        matrix_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_affine_matrix.npy")
-        # deformation_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_diff_matrix.npy")
-        # Create necessary directories
-        os.makedirs(os.path.dirname(affine_pred_path), exist_ok=True)
-        os.makedirs(os.path.dirname(diff_pred_path), exist_ok=True)
-        os.makedirs(os.path.dirname(matrix_pred_path), exist_ok=True)
+        coords_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_coords.npy")
 
-        # Save affine transformed image
-        last_affine_image = affine_transformed[-1].squeeze().detach().cpu().numpy()
-        io.imsave(affine_pred_path, last_affine_image)
+        os.makedirs(os.path.dirname(diff_pred_path), exist_ok=True)
 
         # Save diffeomorphic transformed image
         last_diff_image = diff_transformed[-1].squeeze().detach().cpu().numpy()
         io.imsave(diff_pred_path, last_diff_image)
 
-        # Save affine matrix
-        registration.save_affine_matrix(matrix_pred_path)
-
-        # Save deformation field
-        # registration.save_deformation_field(deformation_pred_path)
+        final_coords_np = final_coordinates.detach().cpu().numpy()
+        np.save(coords_pred_path, final_coords_np)
 
     print("Registration complete. Results saved in output directory.")
 

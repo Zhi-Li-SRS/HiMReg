@@ -93,6 +93,7 @@ class DiffRegistration:
         # Initialize affine transformation
         self._init_affine(init_affine)
         self.smooth_warp_sigma = 0  # Reset after initialization
+        self.final_coordinates = None
 
     def validate_inputs(self, scales, iterations):
         """Validate input parameters."""
@@ -239,8 +240,10 @@ class DiffRegistration:
                 if self.converged(loss.item()):
                     break
 
-                if save_transformed:
-                    transformed_images.append(moved_image.detach().cpu())
+            self.final_coordinates = fixed_image_affinecoords + warp_field
+
+            if save_transformed:
+                transformed_images.append(moved_image.detach().cpu())
 
         return transformed_images if save_transformed else None
 
@@ -277,47 +280,19 @@ class DiffRegistration:
 
         return fixed_image_down, moving_image_blur
 
-    def get_warped_coordinates(self, fixed_images, moving_images, shape=None):
-        """Get the warped coordinates of the moving images."""
-        fixed_arrays = fixed_images()
-        if shape is None:
-            shape = fixed_images.shape
-        else:
-            shape = [fixed_arrays.shape[0], 1] + list(shape)
+    def get_final_coordinates(self):
+        """Get the final affine coordinates."""
+        if self.final_coordinates is None:
+            raise RuntimeError("Final coordinates not computed. Run optimize() first.")
+        return self.final_coordinates
 
-        fixed_t2p = fixed_images.get_torch2phy()
-        moving_p2t = moving_images.get_phy2torch()
-        affine_map_init = torch.matmul(moving_p2t, torch.matmul(self.affine, fixed_t2p))[:, :-1]
-        fixed_image_affinecoords = F.affine_grid(affine_map_init, shape, align_corners=self.align_corners)
-        warp_field = self.warp.get_warp().clone()
+    def apply_transform(self, moving_image):
+        """Apply the final transformation to a new image."""
+        if self.final_coordinates is None:
+            raise RuntimeError("Final coordinates not computed. Run optimize() first.")
 
-        if tuple(warp_field.shape[1:-1]) != tuple(shape[2:]):
-            warp_field = F.interpolate(
-                warp_field.permute(*self.warp.permute_vtoimg),
-                size=shape[2:],
-                mode="trilinear",
-                align_corners=self.align_corners,
-            ).permute(*self.warp.permute_imgtov)
-
-        if self.smooth_warp_sigma > 0:
-            warp_gaussian = [
-                gaussian_1d(s, truncated=2)
-                for s in (torch.zeros(self.dims, device=fixed_arrays.device) + self.smooth_warp_sigma)
-            ]
-            warp_field = seperate_filter(
-                warp_field.permute(*self.warp.permute_vtoimg), warp_gaussian
-            ).permute(*self.warp.permute_imgtov)
-
-        moved_coords = fixed_image_affinecoords + warp_field
-        return moved_coords
-
-    def evaluate(self, fixed_images, moving_images, shape=None):
-        moving_arrays = moving_images()
-        moved_coords = self.get_warped_coordinates(fixed_images, moving_images, shape=shape)
-        moved_image = F.grid_sample(
-            moving_arrays, moved_coords, mode="bilinear", align_corners=self.align_corners
-        )
-        return moved_image
+        transformed = F.grid_sample(moving_image, self.final_coordinates, mode="bilinear", align_corners=True)
+        return transformed
 
 
 class DiffOptimizer(nn.Module):
