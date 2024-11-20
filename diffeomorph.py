@@ -1,6 +1,6 @@
 from copy import deepcopy
 from functools import partial
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -13,6 +13,32 @@ from utils import *
 
 
 class DiffRegistration:
+    """
+    Implements diffeomorphic registration between fixed and moving images.
+
+    Args:
+        scales: List of scales for multi-resolution optimization
+        iterations: List of iterations per scale
+        fixed_images: Fixed image for registration
+        moving_images: Moving image to be registered
+        loss_type: Loss function type ('mi' or 'cc')
+        optimizer: Optimizer type ('Adam' or 'SGD')
+        optimizer_params: Additional optimizer parameters
+        optimizer_lr: Learning rate
+        mi_kernel_type: Kernel type for mutual information loss
+        cc_kernel_type: Kernel type for cross correlation loss
+        cc_kernel_size: Kernel size for cross correlation
+        smooth_warp_sigma: Sigma for warp field smoothing
+        smooth_grad_sigma: Sigma for gradient smoothing
+        loss_params: Additional loss function parameters
+        tolerance: Convergence tolerance threshold
+        max_tolerance_iters: Maximum iterations for convergence check
+        init_affine: Initial affine transform
+        blur: Whether to apply Gaussian blur at each scale
+        align_corners: Grid sample align corners parameter
+        loss_device: Device to compute loss on
+    """
+
     def __init__(
         self,
         scales,
@@ -20,7 +46,6 @@ class DiffRegistration:
         fixed_images,
         moving_images,
         loss_type="mi",
-        deformation_type="compositive",
         optimizer="Adam",
         optimizer_params={},
         optimizer_lr=0.25,
@@ -37,10 +62,12 @@ class DiffRegistration:
         align_corners=True,
         loss_device=None,
     ):
+        # Validate inputs
+        self.validate_inputs(scales, iterations)
+
+        # Set basic parameters
         self.scales = scales
         self.iterations = iterations
-        assert len(self.iterations) == len(self.scales), "Number of iterations must match number of scales"
-
         self.fixed_images = fixed_images
         self.moving_images = moving_images
         self.device = fixed_images.device
@@ -50,7 +77,30 @@ class DiffRegistration:
         self.align_corners = align_corners
         self.loss_device = loss_device
 
+        # Convergence params
+        self.tolerance = tolerance
+        self.max_tolerance_iters = max_tolerance_iters
+        self.losses = deque(maxlen=max_tolerance_iters)
+
         # Initialize loss function
+        self.init_loss_function(loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params)
+
+        # Initialize optimizer
+        self.init_optimizer(
+            optimizer, optimizer_lr, optimizer_params, smooth_grad_sigma, smooth_warp_sigma, scales[0]
+        )
+
+        # Initialize affine transformation
+        self._init_affine(init_affine)
+        self.smooth_warp_sigma = 0  # Reset after initialization
+
+    def validate_inputs(self, scales, iterations):
+        """Validate input parameters."""
+        if len(iterations) != len(scales):
+            raise ValueError("Number of iterations must match number of scales")
+
+    def init_loss_function(self, loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params):
+        """Initialize loss function."""
         if loss_type == "mi":
             self.loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
         elif loss_type == "cc":
@@ -60,29 +110,172 @@ class DiffRegistration:
         else:
             raise ValueError(f"Loss type {loss_type} not supported")
 
+    def init_optimizer(
+        self, optimizer, optimizer_lr, optimizer_params, smooth_grad_sigma, smooth_warp_sigma, init_scale
+    ):
+        """Initialize optimizer."""
         compositive_params = {
-            "fixed_images": fixed_images,
-            "moving_images": moving_images,
+            "fixed_images": self.fixed_images,
+            "moving_images": self.moving_images,
             "optimizer": optimizer,
             "optimizer_lr": optimizer_lr,
             "optimizer_params": optimizer_params,
-            "init_scale": scales[0],
+            "init_scale": init_scale,
             "smoothing_grad_sigma": smooth_grad_sigma,
             "smoothing_warp_sigma": smooth_warp_sigma,
         }
-        self.warp = CompositiveWarp(**compositive_params)
-        smooth_warp_sigma = 0
+        self.warp = DiffOptimizer(**compositive_params)
 
-        self.smooth_warp_sigma = smooth_warp_sigma
-
-        # Initialize affine
+    def _init_affine(self, init_affine: Optional[torch.Tensor]):
+        """Initialize affine transformation."""
         if init_affine is None:
             init_affine = (
-                torch.eye(self.dims + 1, device=fixed_images.device)
+                torch.eye(self.dims + 1, device=self.device)
                 .unsqueeze(0)
-                .repeat(fixed_images.size(), 1, 1)
+                .repeat(self.fixed_images.size(), 1, 1)
             )
         self.affine = init_affine.detach()
+
+    def _compute_slope(self):
+        """Compute the slope of the best-fit line using simple linear regression."""
+        if len(self.losses) < 2:
+            return 0
+
+        x = np.arange(len(self.losses))
+        y = np.array(self.losses)
+
+        xy_sum = np.dot(x, y)
+        x_sum = x.sum()
+        y_sum = y.sum()
+        x_squared_sum = (x**2).sum()
+        N = len(self.losses)
+
+        numerator = N * xy_sum - x_sum * y_sum
+        denominator = N * x_squared_sum - x_sum**2
+        if denominator == 0:
+            return 0
+        slope = numerator / denominator
+        return slope
+
+    def converged(self, loss):
+        """Check if the loss has increased (i.e., slope > threshold)."""
+        self.losses.append(loss)
+        if len(self.losses) < self.max_tolerance_iters:
+            return False
+        else:
+            slope = self._compute_slope()
+            return slope > self.tolerance
+
+    def compute_regularization_loss(self, warp_field: torch.Tensor):
+        """Compute regularization loss."""
+        grad = torch.gradient(warp_field, dim=(1, 2, 3))
+        grad_norm = sum(torch.sum(g**2) for g in grad)
+        return grad_norm
+
+    def optimize(self, save_transformed=False):
+        """
+        Optimize the registration.
+        Args:
+            save_transformed: Whether to save transformed images during optimization
+
+        Returns:
+            List of transformed images if save_transformed=True, else None
+        """
+
+        fixed_arrays = self.fixed_images()
+        moving_arrays = self.moving_images()
+        fixed_t2p = self.fixed_images.get_pixel_to_physical()
+        moving_p2t = self.moving_images.get_physical_to_pixel()
+        fixed_size = fixed_arrays.shape[2:]
+        affine_map_init = torch.matmul(moving_p2t, torch.matmul(self.affine, fixed_t2p))[:, :-1]
+
+        transformed_images = [] if save_transformed else None
+        warp_gaussian = self.get_warp_gaussian()
+
+        # Hierarchical optimization
+        for scale, iters in zip(self.scales, self.iterations):
+            self.losses.clear()
+
+            size_down = [max(int(s / scale), 1) for s in fixed_size]
+            fixed_image_down, moving_image_blur = self.prepare_images_for_scale(
+                fixed_arrays, moving_arrays, size_down, scale
+            )
+
+            # Setup registration at current scale
+            self.warp.update_field_size(size_down)
+            fixed_image_affinecoords = F.affine_grid(
+                affine_map_init, fixed_image_down.shape, align_corners=self.align_corners
+            )
+
+            pbar = tqdm(range(iters))
+            for i in pbar:
+                # Forward pass
+                warp_field = self.warp.get_displacement_field()
+                if self.smooth_warp_sigma > 0:
+                    warp_field = seperate_filter(
+                        warp_field.permute(*self.warp.permute_vtoimg), warp_gaussian
+                    ).permute(*self.warp.permute_imgtov)
+
+                moved_coords = fixed_image_affinecoords + warp_field
+                moved_image = F.grid_sample(
+                    moving_image_blur, moved_coords, mode="bilinear", align_corners=self.align_corners
+                )
+
+                if self.loss_device is not None:
+                    moved_image = moved_image.to(self.loss_device)
+                    fixed_image_down = fixed_image_down.to(self.loss_device)
+
+                # Compute loss and optimize
+                sim_loss = self.loss_fn(moved_image, fixed_image_down)
+                reg_loss = self.compute_regularization_loss(warp_field)
+                loss = sim_loss + 0.05 * reg_loss
+
+                self.warp.reset_gradients()
+                loss.backward(retain_graph=True)
+                self.warp.optimization_step()
+
+                pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
+
+                if self.converged(loss.item()):
+                    break
+
+                if save_transformed:
+                    transformed_images.append(moved_image.detach().cpu())
+
+        return transformed_images if save_transformed else None
+
+    def get_warp_gaussian(self) -> List[torch.Tensor]:
+        """Get Gaussian kernels for warp smoothing."""
+        if self.smooth_warp_sigma <= 0:
+            return []
+        return [
+            gaussian_1d(s, truncated=2)
+            for s in (torch.zeros(self.dims, device=self.device) + self.smooth_warp_sigma)
+        ]
+
+    def prepare_images_for_scale(
+        self, fixed_arrays: torch.Tensor, moving_arrays: torch.Tensor, size_down: List[int], scale: int
+    ) -> tuple:
+        """Prepare fixed and moving images for current scale."""
+        if self.blur and scale > 1:
+            sigmas = 0.5 * torch.tensor(
+                [sz / szdown for sz, szdown in zip(fixed_arrays.shape[2:], size_down)], device=self.device
+            )
+            gaussians = [gaussian_1d(s, truncated=2) for s in sigmas]
+            fixed_image_down = downsample(
+                fixed_arrays, size=size_down, mode=self.fixed_images.interpolate_mode, sigma=sigmas
+            )
+            moving_image_blur = seperate_filter(moving_arrays, gaussians)
+        else:
+            fixed_image_down = F.interpolate(
+                fixed_arrays,
+                size=size_down,
+                mode=self.fixed_images.interpolate_mode,
+                align_corners=self.align_corners,
+            )
+            moving_image_blur = moving_arrays
+
+        return fixed_image_down, moving_image_blur
 
     def get_warped_coordinates(self, fixed_images, moving_images, shape=None):
         """Get the warped coordinates of the moving images."""
@@ -126,124 +319,21 @@ class DiffRegistration:
         )
         return moved_image
 
-    def compute_regularization_loss(self, warp_field):
-        """Compute regularization loss."""
-        grad = torch.gradient(warp_field, dim=(1, 2, 3))
-        grad_norm = sum(torch.sum(g**2) for g in grad)
-        return grad_norm
 
-    def _compute_slope(self):
-        """Compute the slope of the best-fit line using simple linear regression."""
-        if len(self.losses) < 2:
-            return 0
-
-        x = np.arange(len(self.losses))
-        y = np.array(self.losses)
-
-        xy_sum = np.dot(x, y)
-        x_sum = x.sum()
-        y_sum = y.sum()
-        x_squared_sum = (x**2).sum()
-        N = len(self.losses)
-
-        numerator = N * xy_sum - x_sum * y_sum
-        denominator = N * x_squared_sum - x_sum**2
-        if denominator == 0:
-            return 0
-        slope = numerator / denominator
-        return slope
-
-    def converged(self, loss):
-        """Check if the loss has increased (i.e., slope > threshold)."""
-        self.losses.append(loss)
-        if len(self.losses) < self.max_tolerance_iters:
-            return False
-        else:
-            slope = self._compute_slope()
-            return slope > self.tolerance
-
-    def optimize(self, save_transformed=False):
-        fixed_arrays = self.fixed_images()
-        moving_arrays = self.moving_images()
-        fixed_t2p = self.fixed_images.get_torch2phy()
-        moving_p2t = self.moving_images.get_phy2torch()
-        fixed_size = fixed_arrays.shape[2:]
-        affine_map_init = torch.matmul(moving_p2t, torch.matmul(self.affine, fixed_t2p))[:, :-1]
-
-        transformed_images = [] if save_transformed else None
-        warp_gaussian = [
-            gaussian_1d(s, truncated=2)
-            for s in (torch.zeros(self.dims, device=fixed_arrays.device) + self.smooth_warp_sigma)
-        ]
-
-        for scale, iters in zip(self.scales, self.iterations):
-            self.convergence_monitor.reset()
-            size_down = [max(int(s / scale), 1) for s in fixed_size]
-
-            if self.blur and scale > 1:
-                sigmas = 0.5 * torch.tensor(
-                    [sz / szdown for sz, szdown in zip(fixed_size, size_down)], device=fixed_arrays.device
-                )
-                gaussians = [gaussian_1d(s, truncated=2) for s in sigmas]
-                fixed_image_down = downsample(
-                    fixed_arrays, size=size_down, mode=self.fixed_images.interpolate_mode, gaussians=gaussians
-                )
-                moving_image_blur = seperate_filter(moving_arrays, gaussians)
-            else:
-                fixed_image_down = F.interpolate(
-                    fixed_arrays,
-                    size=size_down,
-                    mode=self.fixed_images.interpolate_mode,
-                    align_corners=self.align_corners,
-                )
-                moving_image_blur = moving_arrays
-
-            self.warp.set_size(size_down)
-            fixed_image_affinecoords = F.affine_grid(
-                affine_map_init, fixed_image_down.shape, align_corners=self.align_corners
-            )
-
-            pbar = tqdm(range(iters)) if self.progress_bar else range(iters)
-            for i in pbar:
-                self.warp.set_zero_grad()
-                warp_field = self.warp.get_warp()
-
-                if self.smooth_warp_sigma > 0:
-                    warp_field = seperate_filter(
-                        warp_field.permute(*self.warp.permute_vtoimg), warp_gaussian
-                    ).permute(*self.warp.permute_imgtov)
-
-                moved_coords = fixed_image_affinecoords + warp_field
-                moved_image = F.grid_sample(
-                    moving_image_blur, moved_coords, mode="bilinear", align_corners=self.align_corners
-                )
-
-                if self.loss_device is not None:
-                    moved_image = moved_image.to(self.loss_device)
-                    fixed_image_down = fixed_image_down.to(self.loss_device)
-
-                sim_loss = self.loss_fn(moved_image, fixed_image_down)
-                reg_loss = self.compute_regularization_loss(warp_field)
-                loss = sim_loss + 0.05 * reg_loss
-                loss.backward(retain_graph=True)
-                self.warp.step()
-
-                if self.convergence_monitor.converged(loss.item()):
-                    break
-
-                if self.progress_bar:
-                    pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
-
-            if save_transformed:
-                transformed_images.append(moved_image.detach().cpu())
-
-        if save_transformed:
-            return transformed_images
-
-
-class CompositiveWarp(nn.Module):
+class DiffOptimizer(nn.Module):
     """
-    Class for compositive warp function (collects gradients of dL/dp)
+    Optimizer for diffeomorphic registration that computes and optimizes displacement field
+
+    Args:
+        fixed_images (torch.Tensor): Fixed images
+        moving_images (torch.Tensor): Moving images
+        optimizer (str): Optimizer type (Adam or SGD)
+        optimizer_lr (float): Learning rate
+        optimizer_params (dict): Additional parameters for optimizer
+        init_scale (float): Initial scale
+        smoothing_grad_sigma (float): Sigma for smoothing gradient
+        smoothing_warp_sigma (float): Sigma for smoothing warp field
+        optimize_inverse_warp (bool): Whether to optimize inverse warp field
     """
 
     def __init__(
@@ -259,111 +349,141 @@ class CompositiveWarp(nn.Module):
         optimize_inverse_warp=False,
     ) -> None:
         super().__init__()
-        self.num_images = num_images = fixed_images.size()
-        spatial_dims = fixed_images.shape[2:]
-        self.n_dims = len(spatial_dims)
+        self.num_images = fixed_images.size()
+        self.spatial_dims = fixed_images.shape[2:]
+        self.n_dims = len(self.spatial_dims)
         # permute indices
         self.permute_imgtov = (0, *range(2, self.n_dims + 2), 1)
         self.permute_vtoimg = (0, self.n_dims + 1, *range(1, self.n_dims + 1))
         self.device = fixed_images.device
-
-        # define warp and register it as a parameter
-        # define inverse warp and register it as a buffer
-        self.optimize_inverse_warp = optimize_inverse_warp
-        # set size
-        if init_scale > 1:
-            spatial_dims = [max(int(s / init_scale), 1) for s in spatial_dims]
-        warp = torch.zeros(
-            [num_images, *spatial_dims, self.n_dims], dtype=torch.float32, device=fixed_images.device
-        )  # [N, HWD, dims]
-        self.register_parameter("warp", nn.Parameter(warp))
-        if self.optimize_inverse_warp:
-            inv = torch.zeros(
-                [num_images, *spatial_dims, self.n_dims], dtype=torch.float32, device=fixed_images.device
-            )  # [N, HWD, dims]
-        else:
-            inv = torch.zeros([1], dtype=torch.float32, device=fixed_images.device)  # dummy
-        self.register_buffer("inv", inv)
-
-        # attach grad hook if smooothing of the gradient is required
+        self.optimizer = optimizer
+        self.optimizer_lr = optimizer_lr
+        self.optimizer_params = optimizer_params
+        self.init_scale = init_scale
         self.smoothing_grad_sigma = smoothing_grad_sigma
-        if smoothing_grad_sigma > 0:
+        self.smoothing_warp_sigma = smoothing_warp_sigma
+        self.optimize_inverse_warp = optimize_inverse_warp
+
+        self.setup_transformation_indices()
+        self.initialize_displacement_fields()
+        self.setup_optimizer()
+
+    def setup_transformation_indices(self):
+        "Initialize permutation indices for image and vectors transformation"
+        self.permute_imgtov = (0, *range(2, self.n_dims + 2), 1)  # [B, C, H, W] -> [B, H, W, C]
+        self.permute_vtoimg = (0, self.n_dims + 1, *range(1, self.n_dims + 1))  # [B, H, W, C] -> [B, C, H, W]
+
+    def initialize_displacement_fields(self):
+        """Initialize the forward and inverse displacement fields."""
+        init_dims = self.get_initial_dims()
+
+        self.forward_field = self.create_displacement_field(init_dims)
+        self.register_parameter("warp", nn.Parameter(self.forward_field))
+
+        self.inverse_field = self.create_inverse_field(init_dims)
+        self.register_parameter("inv", nn.Parameter(self.inverse_field))
+
+    def get_initial_dims(self):
+        """Calculate the intial dimensions based on the scale."""
+        if self.init_scale > 1:
+            return [max(int(s / self.init_scale), 1) for s in self.spatial_dims]
+
+        return list(self.spatial_dims)
+
+    def create_displacement_field(self, dimensions: List[int]):
+        """Create a zero-initialized displacement field."""
+        d = torch.zeros([self.num_images, *dimensions, self.n_dims], dtype=torch.float32, device=self.device)
+        return d
+
+    def create_inverse_field(self, dimensions: List[int]):
+        """Create a inverse displacement field if needed."""
+        if self.optimize_inverse_warp:
+            return self.create_displacement_field(dimensions)
+        return torch.zeros([1], dtype=torch.float32, device=self.device)
+
+    def setup_optimizer(self):
+        """Setup the optimizer."""
+        self.setup_smoothing()
+
+        optimizer_params = self.prepare_optimizer_params()
+
+        self.optimizer = DiffAdam(self.warp, lr=self.optimizer_lr, **optimizer_params)
+
+    def setup_smoothing(self):
+        if self.smoothing_grad_sigma > 0:
             self.smoothing_grad_gaussians = [
                 gaussian_1d(s, truncated=2)
-                for s in (torch.zeros(self.n_dims, device=fixed_images.device) + smoothing_grad_sigma)
+                for s in torch.zeros(self.n_dims, device=self.device) + self.smoothing_grad_sigma
             ]
-        self.attach_grad_hook()
+            self.attach_gradient_hooks()
 
-        oparams = deepcopy(optimizer_params)
-        self.smoothing_warp_sigma = smoothing_warp_sigma
+    def prepare_optimizer_params(self):
+        params = deepcopy(self.optimizer_params)
         if self.smoothing_warp_sigma > 0:
-            smoothing_warp_gaussians = [
+            params["smoothing_gaussians"] = [
                 gaussian_1d(s, truncated=2)
-                for s in (torch.zeros(self.n_dims, device=fixed_images.device) + smoothing_warp_sigma)
+                for s in torch.zeros(self.n_dims, device=self.device) + self.smoothing_warp_sigma
             ]
-            oparams["smoothing_gaussians"] = smoothing_warp_gaussians
+        params["optimize_inverse_warp"] = self.optimize_inverse_warp
+        if self.optimize_inverse_warp:
+            params["warpinv"] = self.inv
 
-        oparams["optimize_inverse_warp"] = optimize_inverse_warp
-        if optimize_inverse_warp:
-            oparams["warpinv"] = self.inv
-        # add optimizer
-        optimizer = optimizer.lower()
-        self.optimizer = DiffAdam(self.warp, lr=optimizer_lr, **oparams)
+        return params
 
-    def attach_grad_hook(self):
-        """attack the grad hook to the velocity field if needed"""
-        if self.smoothing_grad_sigma > 0:
-            hook = partial(grad_smoothing_hook, gaussians=self.smoothing_grad_gaussians)
-            self.warp.register_hook(hook)
+    def attach_gradient_hooks(self):
+        """Attach gradient smoothing hooks."""
+        hook = partial(grad_smoothing_hook, gaussians=self.smoothing_grad_gaussians)
+        self.warp.register_hook(hook)
 
     def initialize_grid(self):
-        """initialize grid to a size
-        Simply use the grid from the optimizer, which should be initialized to the correct size
-        """
         self.grid = self.optimizer.grid
 
-    def set_zero_grad(self):
-        """set the gradient to zero (or None)"""
+    def reset_gradients(self):
         self.optimizer.zero_grad()
 
-    def step(self):
+    def optimization_step(self):
         self.optimizer.step()
 
-    def get_warp(self):
-        """return warp function"""
-        warp = self.warp
-        return warp
+    def get_displacement_field(self):
+        return self.warp
 
-    def get_inverse_warp(self, n_iters: int = 50, debug: bool = False, lr=0.1):
-        """run an optimization procedure to get the inverse warp"""
+    def get_inverse_field(self):
         if self.optimize_inverse_warp:
-            invwarp = self.inv
-            invwarp = compute_inverse_warp_displacement(self.warp.data, self.grid, invwarp, iters=20)
+            invfield = compute_inverse_warp_displacement(self.warp.data, self.grid, self.inv, iters=20)
         else:
-            # no invwarp is defined, start from scratch
-            invwarp = compute_inverse_warp_displacement(self.warp.data, self.grid, -self.warp.data, iters=200)
-        return invwarp
+            invfield = compute_inverse_warp_displacement(
+                self.warp.data, self.grid, -self.warp.data, iters=200
+            )
+        return invfield
 
-    def set_size(self, size):
-        # print(f"Setting size to {size}")
-        """size: [H, W, D] or [H, W]"""
+    def update_field_size(self, new_size: Tuple[int, ...]):
+        """
+        Update the size of displacement fields
+
+        Args:
+            new_size: New spatial dimensions
+        """
         mode = "bilinear" if self.n_dims == 2 else "trilinear"
-        # get new displacement field
-        warp = F.interpolate(
-            self.warp.detach().permute(*self.permute_vtoimg), size=size, mode=mode, align_corners=True
-        ).permute(*self.permute_imgtov)
-        self.register_parameter("warp", nn.Parameter(warp))
-        # set new inverse displacement field
+        # Interpolate and wrap as Parameter
+        interpolated_warp = self.interpolate_field(self.warp, new_size, mode)
+        self.warp = nn.Parameter(interpolated_warp)
+
+        # Update inverse field if needed
         if len(self.inv.shape) > 1:
-            self.inv = F.interpolate(
-                self.inv.permute(*self.permute_vtoimg), size=size, mode=mode, align_corners=True
-            ).permute(*self.permute_imgtov)
-        self.attach_grad_hook()
-        self.optimizer.set_data_and_size(
-            self.warp, size, warpinv=self.inv if self.optimize_inverse_warp else None
-        )
-        # interpolate inverse warp if it exists
+            interpolated_inv = self.interpolate_field(self.inv, new_size, mode)
+            self.inv = nn.Parameter(interpolated_inv)
+
+        self.attach_gradient_hooks()
+        optimizer_params = self.prepare_optimizer_params()
+        self.optimizer = DiffAdam(self.warp, lr=self.optimizer_lr, **optimizer_params)
+
         self.initialize_grid()
+
+    def interpolate_field(self, field: torch.Tensor, size: Tuple[int, ...], mode: str):
+        """Helper method to interpolate displacement fields"""
+        return F.interpolate(
+            field.detach().permute(*self.permute_vtoimg), size=size, mode=mode, align_corners=True
+        ).permute(*self.permute_imgtov)
 
 
 class DiffAdam:
@@ -440,20 +560,20 @@ class DiffAdam:
         )
         self.grid = F.affine_grid(
             self.affine_init, [self.batch_size, 1, *self.warp.shape[1:-1]], align_corners=True
-        ).detach()
+        ).detach()  # grid is fixed and do not need any gradient
 
     def compute_moments(self, grad):
         """Compute the moments of the gradient"""
         self.step_t += 1
 
         # Update biased first moment estimate
-        self.exp_avg.mul_(self.beta1).add_(grad, alpha=1 - self.beta1)
+        self.exp_avg = self.beta1 * self.exp_avg + (1 - self.beta1) * grad
         # Update biased second raw moment estimate
-        self.exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad.conj(), value=1 - self.beta2)
+        self.exp_avg_sq = self.beta2 * self.exp_avg_sq + (1 - self.beta2) * (grad**2)
 
         bias_correction1 = 1 - self.beta1**self.step_t
         bias_correction2 = 1 - self.beta2**self.step_t
-        denom = (self.exp_avg_sq / bias_correction2).sqrt().add_(self.eps)
+        denom = (self.exp_avg_sq / bias_correction2).sqrt() + self.eps
 
         return self.exp_avg / bias_correction1 / denom
 
@@ -482,7 +602,7 @@ class DiffAdam:
             )
         return w
 
-    def optimize_inverse_warp(self, w):
+    def _optimize_inverse_warp(self, w):
         """Optimize the inverse warp field."""
         if self.optimize_inverse_warp and self.warpinv is not None:
             invwarp = compute_inverse_warp_displacement(self.warp.data, self.grid, self.warpinv.data, iters=5)
@@ -495,11 +615,26 @@ class DiffAdam:
         self.warp.grad = None
 
     def augment_jacobian(self, u):
+        """
+        Augment the gradient with the Jacobian
+
+        Args:
+            u (Tensor): The gradient
+
+        Returns:
+            ujac (Tensor): The gradient augmented with the Jacobian
+        """
         jac = jacobian(self.warp.data + self.grid, normalize=True)  # [B, dims, H, W, [D], dims]
         if self.n_dims == 2:
-            ujac = torch.einsum("bxhwp,bhwp->bhwx", jac, u)
+            jac_reshape = jac.permute(0, 2, 3, 1, 4)
+            u_reshape = u.unsqueeze(-2)
+            ujac = torch.matmul(u_reshape, jac_reshape.transpose(-2, -1))
+            ujac = ujac.squeeze(-2)  # [B,H,W,2]
         else:
-            ujac = torch.einsum("bxhwdp,bhwdp->bhwdx", jac, u)
+            jac_reshape = jac.permute(0, 2, 3, 4, 1, 5)
+            u_reshape = u.unsqueeze(-2)
+            ujac = torch.matmul(u_reshape, jac_reshape.transpose(-2, -1))
+            ujac = ujac.squeeze(-2)  # [B,H,W,D,3]
         return ujac
 
     def step(self):
@@ -514,14 +649,14 @@ class DiffAdam:
             grad = self.augment_jacobian(grad)
 
         if self.weight_decay > 0:
-            grad.add_(self.warp.data, alpha=self.weight_decay)
+            grad = grad + self.weight_decay * self.warp.data
 
         grad = self.compute_moments(grad)
         grad = self.normalize_gradient(grad)
-        grad.mul_(-self.lr)
+        grad *= -self.lr
         w = self.update_warp_field(grad)
 
-        w, invwarp = self.optimize_inverse_warp(w)
+        w, invwarp = self._optimize_inverse_warp(w)
 
         # Update parameters
         self.warp.data.copy_(w)

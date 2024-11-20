@@ -6,7 +6,7 @@ import skimage.io as io
 import torch
 import torch.nn.functional as F
 
-from affine import AffineRegistration
+from affinemorph import AffineRegistration
 from data_load import Image
 from diffeomorph import DiffRegistration
 
@@ -61,7 +61,7 @@ class HiMReg:
 
         affine_matrix = self.affine_registration.get_affine_matrix()
 
-        self.diff_registration.affine = affine_matrix
+        self.diff_registration.init_affine = affine_matrix
         diff_transformed = self.diff_registration.optimize(save_transformed=save_transformed)
 
         if save_transformed:
@@ -119,10 +119,10 @@ def get_args():
         "--moving", type=str, default="data/D385_7A2/lipid_unsat_roi1.tif", help="Path to moving image"
     )
     parser.add_argument("--output", type=str, default="pred", help="Output directory")
-    parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4, 3])
-    parser.add_argument("--affine_iterations", nargs="+", type=int, default=[800, 600, 400, 100])
-    parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 3])
-    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100])
+    parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4])
+    parser.add_argument("--affine_iterations", nargs="+", type=int, default=[800, 600, 400])
+    parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4])
+    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400])
     parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
     return parser.parse_args()
 
@@ -143,7 +143,7 @@ def main():
         diff_scales=args.diff_scales,
         diff_iterations=args.diff_iterations,
         affine_kwargs={"loss_type": args.loss_type},
-        diff_kwargs={"loss_type": args.loss_type, "deformation_type": "compositive"},
+        diff_kwargs={"loss_type": args.loss_type},
     )
 
     transformed_images = registration.register(save_transformed=True)
