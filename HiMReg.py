@@ -55,31 +55,77 @@ class HiMReg:
             **diff_kwargs,
         )
 
-    def register(self, save_transformed=True):
+    def register(self, register_type="affine", save_transformed=True):
         """
         Perform registration of the moving image to the fixed image.
 
         Args:
+            register_type (str): Type of registration to perform ("affine" or "diff").
+                                     "affine" performs only affine registration.
+                                    "diff" performs affine followed by diffeomorphic registration.
+
             save_transformed (bool): Whether to save transformed images during optimization.
         Returns:
-            tuple: (transformed_images, final_coordinates)
+            tuple: (affine_transformed, diff_transformed, final_coordinates)
+                  If register_type='affine': diff_transformed will be None
+
         """
+        # Affine registration
+        original_size = self.fixed_images().shape[2:]  # spatial dimensions
+        batch_size = self.fixed_images.size()
+        input_shape = [batch_size, 1, *original_size]  # [B, C, H, W]
 
         affine_transformed = self.affine_registration.optimize(save_transformed=save_transformed)
-
         affine_matrix = self.affine_registration.get_final_transform()
 
+        if register_type == "affine":
+            affine_coords = F.affine_grid(affine_matrix[:, :-1], input_shape, align_corners=True)
+            affine_transformed = self._upsample_transformed_images(affine_transformed, original_size)
+            return affine_transformed, None, affine_coords
+
+        # Diffeomorphic registration
         self.diff_registration.init_affine = affine_matrix
         diff_transformed = self.diff_registration.optimize(save_transformed=save_transformed)
-
-        final_coordinates = None
         final_coordinates = self.diff_registration.get_final_coordinates()
+        if final_coordinates is not None:
+            current_size = final_coordinates.shape[1:-1]
+            if current_size != original_size:
+                final_coordinates = F.interpolate(
+                    final_coordinates.permute(0, 3, 1, 2),  # [B, H, W, 2] -> [B, 2, H, W]
+                    size=original_size,
+                    mode="bilinear",
+                    align_corners=True,
+                ).permute(
+                    0, 2, 3, 1
+                )  # [B, 2, H, W] -> [B, H, W, 2]
 
-        return diff_transformed, final_coordinates
+            diff_transformed = self._upsample_transformed_images(diff_transformed, original_size)
+        return affine_transformed, diff_transformed, final_coordinates
+
+    def _upsample_transformed_images(self, transformed_images, target_size):
+        """Helper method to upsample transformed images to target size."""
+        if not transformed_images:
+            return transformed_images
+
+        last_transformed = transformed_images[-1]
+        upsampled_transformed = F.interpolate(
+            last_transformed, size=target_size, mode="bilinear", align_corners=True
+        )
+        return transformed_images[:-1] + [upsampled_transformed]
 
     @staticmethod
     def apply_transformation(image: torch.Tensor, coords_path: str, device: str):
         coords = torch.from_numpy(np.load(coords_path)).to(device).float()
+        if coords.shape[1:-1] != image.shape[2:]:
+            coords = F.interpolate(
+                coords.permute(0, 3, 1, 2),  # [B, 2, H, W]
+                size=image.shape[2:],
+                mode="bilinear",
+                align_corners=True,
+            ).permute(
+                0, 2, 3, 1
+            )  # Back to [B, H, W, 2]
+
         transformed = F.grid_sample(image, coords, mode="bilinear", align_corners=True)
         return transformed
 
@@ -96,6 +142,9 @@ def get_args():
     parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
     parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
     parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
+    parser.add_argument(
+        "register_type", choices=["affine", "diff"], default="affine", help="Type of registration"
+    )
     return parser.parse_args()
 
 
@@ -118,30 +167,32 @@ def main():
         diff_kwargs={"loss_type": args.loss_type},
     )
 
-    transformed_images = registration.register(save_transformed=True)
+    affine_transformed, diff_transformed, final_coordinates = registration.register(
+        register_type=args.register_type, save_transformed=True
+    )
 
-    if transformed_images:
-        diff_transformed, final_coordinates = transformed_images
+    # Setup output paths
+    moving_dir, moving_filename = os.path.split(args.moving)
+    moving_basename = os.path.splitext(moving_filename)[0]
+    relative_path = os.path.relpath(moving_dir, start=os.path.dirname(moving_dir))
+    os.makedirs(os.path.join(args.output, relative_path), exist_ok=True)
 
-        # Create the output directory
-        moving_dir, moving_filename = os.path.split(args.moving)
-        moving_basename = os.path.splitext(moving_filename)[0]
-        relative_path = os.path.relpath(moving_dir, start=os.path.dirname(moving_dir))
+    if affine_transformed:
+        affine_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_affine.tif")
+        last_affine_image = affine_transformed[-1].squeeze().detach().cpu().numpy()
+        io.imsave(affine_pred_path, last_affine_image)
 
-        # affine_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_affine.tif")
+    if diff_transformed:
         diff_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_diff.tif")
-        coords_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_coords.npy")
-
-        os.makedirs(os.path.dirname(diff_pred_path), exist_ok=True)
-
-        # Save diffeomorphic transformed image
         last_diff_image = diff_transformed[-1].squeeze().detach().cpu().numpy()
         io.imsave(diff_pred_path, last_diff_image)
 
+    if final_coordinates is not None:
+        coords_pred_path = os.path.join(args.output, relative_path, f"{moving_basename}_coords.npy")
         final_coords_np = final_coordinates.detach().cpu().numpy()
         np.save(coords_pred_path, final_coords_np)
 
-    print("Registration complete. Results saved in output directory.")
+    print(f"Registration complete. Results saved in {args.output}")
 
 
 if __name__ == "__main__":

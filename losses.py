@@ -153,7 +153,7 @@ class LNCC(nn.Module):
 
     def __init__(
         self,
-        spatial_dims=3,
+        spatial_dims=2,
         kernel_size=3,
         kernel_type="rectangular",
         reduction="mean",
