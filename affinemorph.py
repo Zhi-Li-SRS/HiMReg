@@ -161,7 +161,7 @@ class AffineRegistration:
             torch.eye(self.dims, self.dims + 1)
             .to(self.fixed_images.device)
             .unsqueeze(0)
-            .repeat(self.fixed_images.size(), 1, 1)  # (B, self.dims, self.dims + 1)
+            .repeat(self.fixed_images.size(), 1, 1)  # (B, 2, 3)
         )
 
         transformed_images = [] if save_transformed else None
