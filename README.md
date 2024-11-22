@@ -2,11 +2,14 @@
 
 HiMReg is a cross domain hierarchical multimodal registration framework with CUDA. It is specifically designed for co-registration for H&E and SRS, then align with MALDI for the metabolic and lipidomic correlation analysis.
 
+## HiMReg Architecture
+![Architecture](https://github.com/Zhi-Li-SRS/HiMReg/blob/main/flow_figure/flowchart.png?raw=true)
+
 ## Features
-- **Multi-Scale Registration**: Implements hierarchical registration with customizable scales and iterations
+- **Hierarchical Registration**: Implements hierarchical registration with customizable scales and iterations
 - **Multiple Registration Methods**:
   - Affine registration for global alignment
-  - Diffeomorphic registration for non-linear deformations
+  - Diffeomorphic registration for non-linear vector field deformations
 - **Loss Functions**:
   - Mutual Information (MI)
   - Local Normalized Cross Correlation (LNCC)
