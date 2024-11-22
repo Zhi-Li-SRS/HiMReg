@@ -1,4 +1,4 @@
-# HiMReg: Hierarchical Medical Image Registration Framework
+# HiMReg: Hierarchical Multimodal Image Registration Framework
 
 HiMReg is a cross domain hierarchical multimodal registration framework with CUDA. It is specifically designed for co-registration for H&E and SRS, then align with MALDI for the metabolic and lipidomic correlation analysis.
 
