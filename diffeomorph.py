@@ -14,7 +14,7 @@ from utils import *
 
 class DiffRegistration:
     """
-    Implements diffeomorphic registration between fixed and moving images.
+    Implements diffeomorphic registration between fi    xed and moving images.
 
     Args:
         scales: List of scales for multi-resolution optimization
@@ -48,14 +48,14 @@ class DiffRegistration:
         loss_type="mi",
         optimizer="Adam",
         optimizer_params={},
-        optimizer_lr=0.25,
+        optimizer_lr=0.5,
         mi_kernel_type="b-spline",
         cc_kernel_type="rectangular",
         cc_kernel_size=7,
-        smooth_warp_sigma=0.4,
-        smooth_grad_sigma=1,
+        smooth_warp_sigma=0.3,
+        smooth_grad_sigma=0.8,
         loss_params={},
-        tolerance=1e-6,
+        tolerance=1e-3,
         max_tolerance_iters=1000,
         init_affine=None,
         blur=True,
@@ -232,7 +232,7 @@ class DiffRegistration:
                 loss = sim_loss + 0.05 * reg_loss
 
                 self.warp.reset_gradients()
-                loss.backward(retain_graph=True)
+                loss.backward()
                 self.warp.optimization_step()
 
                 pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
@@ -552,15 +552,6 @@ class DiffAdam:
 
         return self.exp_avg / bias_correction1 / denom
 
-    def normalize_gradient(self, grad):
-        gradmax = self.eps + grad.norm(p=2, dim=-1, keepdim=True).flatten(1).max(1).values
-        gradmax = gradmax.reshape(-1, *([1]) * (self.n_dims + 1))
-
-        if not self.scaledown:
-            gradmax = torch.clamp(gradmax, min=1)
-
-        return grad / gradmax * self.half_resolution
-
     def update_warp_field(self, grad):
         """Update warp field using compositional update."""
 
@@ -618,7 +609,9 @@ class DiffAdam:
         Updates the warp field using a compositional update rule while
         maintaining momentum and adaptive learning rates from Adam.
         """
-        grad = torch.clone(self.warp.grad.data).detach()
+        if self.warp.grad is None:
+            return
+        grad = self.warp.grad.data.detach()
 
         if self.multiply_jacobian:
             grad = self.augment_jacobian(grad)
@@ -627,10 +620,15 @@ class DiffAdam:
             grad = grad + self.weight_decay * self.warp.data
 
         grad = self.compute_moments(grad)
-        grad = self.normalize_gradient(grad)
-        grad *= -self.lr
-        w = self.update_warp_field(grad)
 
+        # Normalize the gradient using L2 norm
+        grad_norm = grad.view(grad.shape[0], -1).norm(p=2, dim=1).view(-1, *([1] * (grad.dim() - 1)))
+        grad_norm = torch.clamp(grad_norm, min=1e-8)
+        normalized_grad = grad / grad_norm
+
+        update = -self.lr * normalized_grad
+
+        w = self.update_warp_field(update)
         w, invwarp = self._optimize_inverse_warp(w)
 
         # Update parameters

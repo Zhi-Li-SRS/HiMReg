@@ -84,6 +84,8 @@ class HiMReg:
             return affine_transformed, None, affine_coords
 
         # Diffeomorphic registration
+        affine_result = affine_transformed[-1].squeeze().detach().cpu().numpy()
+        self.diff_registration.moving_images = Image(affine_result, device=self.device)
         self.diff_registration.init_affine = affine_matrix
         diff_transformed = self.diff_registration.optimize(save_transformed=save_transformed)
         final_coordinates = self.diff_registration.get_final_coordinates()
@@ -132,18 +134,19 @@ class HiMReg:
 
 def get_args():
     parser = argparse.ArgumentParser(description="Multiscale cross modal image registration")
-    parser.add_argument("--fixed", type=str, default="data/D385_7A2/he_roi1.tif", help="Path to fixed image")
+    parser.add_argument("--fixed", type=str, default="data/vander/AF-3.tif", help="Path to fixed image")
     parser.add_argument(
-        "--moving", type=str, default="data/D385_7A2/lipid_unsat_roi1.tif", help="Path to moving image"
+        "--moving", type=str, default="data/vander/proteins-3_rescale.tif", help="Path to moving image"
     )
     parser.add_argument("--output", type=str, default="pred", help="Output directory")
     parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
     parser.add_argument("--affine_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
     parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
-    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
+    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[600, 400, 200, 100, 50])
     parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
+
     parser.add_argument(
-        "register_type", choices=["affine", "diff"], default="affine", help="Type of registration"
+        "--register_type", choices=["affine", "diff"], default="diff", help="Type of registration"
     )
     return parser.parse_args()
 
