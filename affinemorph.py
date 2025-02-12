@@ -23,7 +23,7 @@ class AffineRegistration:
         loss_type="mi",
         optimizer_params={},
         loss_params={},
-        optimizer_lr=3e-3,
+        optimizer_lr=1e-3,
         mi_kernel_type="b-spline",
         cc_kernel_type="rectangular",
         cc_kernel_size=7,

@@ -134,7 +134,9 @@ class HiMReg:
 
 def get_args():
     parser = argparse.ArgumentParser(description="Multiscale cross modal image registration")
-    parser.add_argument("--fixed", type=str, default="data/vander/AF-3.tif", help="Path to fixed image")
+    parser.add_argument(
+        "--fixed", type=str, default="data/vander/DAPI-3_diff.tif", help="Path to fixed image"
+    )
     parser.add_argument(
         "--moving", type=str, default="data/vander/proteins-3_rescale.tif", help="Path to moving image"
     )
@@ -142,7 +144,7 @@ def get_args():
     parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
     parser.add_argument("--affine_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
     parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
-    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[600, 400, 200, 100, 50])
+    parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
     parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
 
     parser.add_argument(
