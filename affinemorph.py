@@ -24,6 +24,9 @@ class AffineRegistration:
         optimizer_params={},
         loss_params={},
         optimizer_lr=1e-3,
+        scale_dependent_lr=None,  # Optional list of learning rates for each scale
+        patience=10,  # Patience for early stopping
+        min_delta=1e-5,
         mi_kernel_type="b-spline",
         cc_kernel_type="rectangular",
         cc_kernel_size=7,
@@ -34,11 +37,6 @@ class AffineRegistration:
         align_corners=True,
         moved_mask=False,
     ):
-
-        # Validate input params
-        self.validate_inputs(scales, iterations)
-
-        # Set basic params
         self.scales = scales
         self.iterations = iterations
         self.fixed_images = fixed_images
@@ -49,15 +47,27 @@ class AffineRegistration:
         self.align_corners = align_corners
         self.moved_mask = moved_mask
 
-        # Set onvergence params
+        # Set convergence params
         self.tolerance = tolerance
         self.max_tolerance_iters = max_tolerance_iters
         self.losses = deque(maxlen=max_tolerance_iters)
 
-        # Initialize loss function
+        # Eearly stopping
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float("inf")
+        self.patience_counter = 0
+
+        # Scale-dependent learning rates
+        self.scale_dependent_lr = scale_dependent_lr
+        self.default_lr = optimizer_lr
+
         self._init_loss_function(loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params)
         self.init_affine_params(init_rigid)
-        self.optimizer = Adam([self.affine], lr=optimizer_lr, **optimizer_params)
+
+        # Initialize optimizer
+        initial_lr = self.get_lr_for_scale(0)
+        self.optimizer = Adam([self.affine], lr=initial_lr, **optimizer_params)
 
         # Initialize final transformation matrix
         self.final_affine_matrix = None
@@ -151,6 +161,22 @@ class AffineRegistration:
 
         return fixed_image_down, moving_image_blur
 
+    def get_lr_for_scale(self, scale_index):
+        """Get learning rate for the current scale"""
+        if self.scale_dependent_lr is not None and scale_index < len(self.scale_dependent_lr):
+            return self.scale_dependent_lr[scale_index]
+        return self.default_lr
+
+    def early_stopping_check(self, current_loss):
+        """Check if early stopping criteria is met"""
+        if current_loss < self.best_loss - self.min_delta:
+            self.best_loss = current_loss
+            self.patience_counter = 0
+            return False
+        else:
+            self.patience_counter += 1
+            return self.patience_counter >= self.patience
+
     def optimize(self, save_transformed=False):
         fixed_arrays = self.fixed_images()
         moving_arrays = self.moving_images()
@@ -166,12 +192,20 @@ class AffineRegistration:
 
         transformed_images = [] if save_transformed else None
 
-        # Initialize cumulative transformation
         self.final_affine_matrix = torch.matmul(moving_p2t, torch.matmul(self.get_affine_matrix(), fixed_t2p))
 
-        # Hierarchical optimization
-        for scale, iters in zip(self.scales, self.iterations):
+        for scale_idx, (scale, iters) in enumerate(zip(self.scales, self.iterations)):
+            # Reset early stopping counters for this scale
+            self.best_loss = float("inf")
+            self.patience_counter = 0
             self.losses.clear()
+
+            scale_lr = self.get_lr_for_scale(scale_idx)
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = scale_lr
+
+            print(f"Scale: {scale}, Learning rate: {scale_lr}")
+
             size_down = [max(int(s / scale), 1) for s in fixed_size]
 
             fixed_image_down, moving_image_blur = self.prepare_images_for_scale(
@@ -215,10 +249,14 @@ class AffineRegistration:
                 loss.backward()
                 self.optimizer.step()
 
-                if self.converged(loss.item()):
+                current_loss = loss.item()
+                if self.early_stopping_check(current_loss):
+                    print(
+                        f"Early stopping at iteration {i+1}/{iters} - Loss hasn't improved for {self.patience} iterations"
+                    )
                     break
 
-                pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
+                pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {current_loss:.4f}")
 
             if save_transformed:
                 transformed_images.append(moved_image.detach().cpu())

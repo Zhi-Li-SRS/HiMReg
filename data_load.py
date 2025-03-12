@@ -201,6 +201,8 @@ class SingleImage:
         """Load an image from a file."""
         if file_path.lower().endswith(".tif") or file_path.lower().endswith(".tiff"):
             self.array = tifffile.imread(file_path)
+            if self.array.dtype == np.uint16:
+                self.array = self.array.astype(np.float32)
             self.array = torch.from_numpy(self.array).to(self.device).float()
             self.itk_image = sitk.GetImageFromArray(self.array.cpu().numpy())
         else:
