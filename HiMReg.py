@@ -148,7 +148,7 @@ def get_args():
     parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
 
     parser.add_argument(
-        "--register_type", choices=["affine", "diff"], default="diff", help="Type of registration"
+        "--register_type", choices=["affine", "diff"], default="affine", help="Type of registration"
     )
     return parser.parse_args()
 
