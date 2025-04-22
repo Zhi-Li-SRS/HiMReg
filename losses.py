@@ -256,6 +256,54 @@ class LNCC(nn.Module):
             f'Unsupported reduction: {self.reduction}, available options are ["mean", "sum", "none"].'
         )
 
+class DICELoss(nn.Module):
+
+    def __init__(
+            self,
+            spatial_dims=2,
+            smooth = 1e-6,
+            kernel_size = 3,
+            stride = 1,
+        ):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.smooth = smooth
+        self.kernel = torch.ones(1, 1, kernel_size, kernel_size)
+        self.ndim = spatial_dims
+        if self.ndim not in {1, 2, 3}:
+            raise ValueError(f"Unsupported ndim: {self.ndim}-d, only 1-d, 2-d, and 3-d inputs are supported")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+
+        if pred.ndim - 2 != self.ndim:
+            raise ValueError(
+                f"expecting pred with {self.ndim} spatial dimensions, got pred of shape {pred.shape}"
+            )
+
+        if target.shape != pred.shape:
+            raise ValueError(f"ground truth has differing shape ({target.shape}) from pred ({pred.shape})")
+
+        pred = pred.float()
+        target = target.float()
+
+        padding = self.kernel_size // 2
+
+        # Dice calculation
+        # Compute local intersection and sums via convolution
+        intersection = F.conv2d(pred * target, self.kernel.to(pred.device), stride=self.stride, padding=padding)
+        pred_sum = F.conv2d(pred, self.kernel.to(pred.device), stride=self.stride, padding=padding)
+        target_sum = F.conv2d(target, self.kernel.to(pred.device), stride=self.stride, padding=padding)
+
+        # Compute local Dice
+        dice_score = (2 * intersection + self.smooth) / (pred_sum + target_sum + self.smooth)
+
+        return 1 - dice_score.mean(dim=(1, 2, 3))
+
+
+
+
+
 
 # def mi(
 #     pred,

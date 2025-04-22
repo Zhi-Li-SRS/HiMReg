@@ -9,7 +9,7 @@ from torch.optim import SGD, Adam
 from tqdm import tqdm
 
 from data_load import Image
-from losses import LNCC, MutualInformation
+from losses import LNCC, MutualInformation, DICELoss
 from utils import *
 
 
@@ -30,6 +30,9 @@ class AffineRegistration:
         mi_kernel_type="b-spline",
         cc_kernel_type="rectangular",
         cc_kernel_size=7,
+        dice_kernel_size=7,
+        dice_smooth=1e-6,
+        dice_stride=3,
         tolerance=1e-4,
         max_tolerance_iters=500,
         init_rigid=None,
@@ -62,7 +65,7 @@ class AffineRegistration:
         self.scale_dependent_lr = scale_dependent_lr
         self.default_lr = optimizer_lr
 
-        self._init_loss_function(loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params)
+        self._init_loss_function(loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, dice_smooth, dice_kernel_size, dice_stride,loss_params)
         self.init_affine_params(init_rigid)
 
         # Initialize optimizer
@@ -77,13 +80,17 @@ class AffineRegistration:
         if len(iterations) != len(scales):
             raise ValueError("Number of iterations must match number of scales")
 
-    def _init_loss_function(self, loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params):
+    def _init_loss_function(self, loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, dice_smooth, dice_kernel_size, dice_stride, loss_params):
         """Initialize loss function."""
         if loss_type == "mi":
             self.loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
         elif loss_type == "cc":
             self.loss_fn = LNCC(
                 kernel_type=cc_kernel_type, spatial_dims=self.dims, kernel_size=cc_kernel_size, **loss_params
+            )
+        elif loss_type == "dice":
+            self.loss_fn = DICELoss(
+                spatial_dims = self.dims, smooth=dice_smooth, kernel_size=dice_kernel_size, stride= dice_stride, **loss_params
             )
         else:
             raise ValueError(f"Loss type {loss_type} not supported")
