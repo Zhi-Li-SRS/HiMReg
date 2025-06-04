@@ -148,12 +148,12 @@ def get_args():
         "--moving", type=str, default="data/register_kidney/postaf-4.tif", help="Path to moving image"
     )
     parser.add_argument("--output", type=str, default="pred", help="Output directory")
-    parser.add_argument("--affine_scales", nargs="+", type=int, default=[8, 6, 4, 2])
-    parser.add_argument("--affine_iterations", nargs="+", type=int, default=[400, 400, 200, 150])
-    parser.add_argument("--scale_dependent_lr", nargs="+", type=float, default=[5e-3, 3e-3, 1e-3, 3e-4])
+    parser.add_argument("--affine_scales", nargs="+", type=int, default=[6, 4, 2, 1])
+    parser.add_argument("--affine_iterations", nargs="+", type=int, default=[400, 400, 200, 200])
+    parser.add_argument("--scale_dependent_lr", nargs="+", type=float, default=[3e-3, 1e-3, 5e-4, 3e-4])
     parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
     parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
-    parser.add_argument("--loss_type", choices=["mi", "cc"], default="mi", help="Loss type for registration")
+    parser.add_argument("--loss_type", choices=["mi", "cc", 'dice'], default="mi", help="Loss type for registration")
 
     parser.add_argument(
         "--register_type", choices=["affine", "diff"], default="affine", help="Type of registration"
