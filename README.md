@@ -13,10 +13,13 @@ HiMReg is a cross domain hierarchical multimodal registration framework with CUD
 - **Loss Functions**:
   - Mutual Information (MI)
   - Local Normalized Cross Correlation (LNCC)
+  - DICE Coefficient (DICE)
   - Support for any customized loss functions
 - **Performance Optimization**:
   - GPU acceleration support
   - Batch processing capabilities
+  Early stopping mechanism for improved convergence (NEW)
+  - Scale-dependent learning rates for better optimization
 - **Evaluation Tools**:
   - Built-in comparison with Elastix registration
   - Multiple evaluation metrics (MI, DICE)
@@ -54,16 +57,38 @@ registration = HiMReg(
     affine_scales=[8, 4, 2, 1],
     affine_iterations=[600, 400, 200, 100],
     diff_scales=[8, 4, 2, 1],
-    diff_iterations=[600, 400, 200, 100]
+    diff_iterations=[600, 400, 200, 100],
+    affine_kwargs={
+        'loss_type': 'dice',  # Use DICE loss
+    }
 )
 
 # Perform registration
 affine_transformed, diff_transformed, final_coordinates = registration.register(
-    register_type="diff",
+    register_type="affine",
     save_transformed=True
 )
 ```
+### Advanced Configuration
 
+```python
+# Example with scale-dependent learning rates and early stopping
+registration = HiMReg(
+    fixed_images=fixed_image,
+    moving_images=moving_image,
+    affine_scales=[8, 4, 2, 1],
+    affine_iterations=[600, 400, 200, 100],
+    scale_dependent_lr=[1e-2, 1e-3, 1e-4, 1e-5],  # Different LR per scale
+    diff_scales=[8, 4, 2, 1],
+    diff_iterations=[600, 400, 200, 100],
+    affine_kwargs={
+        'loss_type': 'mi',     # Mutual Information loss
+    },
+    diff_kwargs={
+        'loss_type': 'cc',     # Cross-correlation loss for diffeomorphic
+    }
+)
+```
 ### Command Line Interface
 
 The framework also provides command-line tools for registration and comparison:
@@ -88,12 +113,15 @@ python compare.py --fixed path/to/fixed.tif --moving path/to/moving.tif --output
 2. **Affine Registration**
    - Global transformation estimation
    - Optimization using Adam optimizer
-   - MI or LNCC loss functions
+   - MI, LNCC or DICE loss functions
+   - Early stopping mechanism for efficient convergence
+   - Scale-dependent learning rates
 
 3. **Diffeomorphic Registration**
-   - deformation field estimation
+   - Deformation field estimation
    - Scaling and squaring for diffeomorphic transformation
    - Regularization for smooth deformations
+   - Convergence monitoring
 
 4. **Evaluation**
    - Multiple similarity metrics

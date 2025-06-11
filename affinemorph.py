@@ -25,7 +25,7 @@ class AffineRegistration:
         loss_params={},
         optimizer_lr=1e-3,
         scale_dependent_lr=None,  # Optional list of learning rates for each scale
-        patience=10,  # Patience for early stopping
+        patience=20,  # Patience for early stopping
         min_delta=1e-5,
         mi_kernel_type="b-spline",
         cc_kernel_type="rectangular",
@@ -65,7 +65,16 @@ class AffineRegistration:
         self.scale_dependent_lr = scale_dependent_lr
         self.default_lr = optimizer_lr
 
-        self._init_loss_function(loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, dice_smooth, dice_kernel_size, dice_stride,loss_params)
+        self._init_loss_function(
+            loss_type,
+            mi_kernel_type,
+            cc_kernel_type,
+            cc_kernel_size,
+            dice_smooth,
+            dice_kernel_size,
+            dice_stride,
+            loss_params,
+        )
         self.init_affine_params(init_rigid)
 
         # Initialize optimizer
@@ -80,7 +89,17 @@ class AffineRegistration:
         if len(iterations) != len(scales):
             raise ValueError("Number of iterations must match number of scales")
 
-    def _init_loss_function(self, loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, dice_smooth, dice_kernel_size, dice_stride, loss_params):
+    def _init_loss_function(
+        self,
+        loss_type,
+        mi_kernel_type,
+        cc_kernel_type,
+        cc_kernel_size,
+        dice_smooth,
+        dice_kernel_size,
+        dice_stride,
+        loss_params,
+    ):
         """Initialize loss function."""
         if loss_type == "mi":
             self.loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
@@ -90,7 +109,11 @@ class AffineRegistration:
             )
         elif loss_type == "dice":
             self.loss_fn = DICELoss(
-                spatial_dims = self.dims, smooth=dice_smooth, kernel_size=dice_kernel_size, stride= dice_stride, **loss_params
+                spatial_dims=self.dims,
+                smooth=dice_smooth,
+                kernel_size=dice_kernel_size,
+                stride=dice_stride,
+                **loss_params,
             )
         else:
             raise ValueError(f"Loss type {loss_type} not supported")

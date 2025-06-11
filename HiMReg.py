@@ -153,7 +153,9 @@ def get_args():
     parser.add_argument("--scale_dependent_lr", nargs="+", type=float, default=[3e-3, 1e-3, 5e-4, 3e-4])
     parser.add_argument("--diff_scales", nargs="+", type=int, default=[8, 6, 4, 2, 1])
     parser.add_argument("--diff_iterations", nargs="+", type=int, default=[800, 600, 400, 100, 50])
-    parser.add_argument("--loss_type", choices=["mi", "cc", 'dice'], default="mi", help="Loss type for registration")
+    parser.add_argument(
+        "--loss_type", choices=["mi", "cc", "dice"], default="mi", help="Loss type for registration"
+    )
 
     parser.add_argument(
         "--register_type", choices=["affine", "diff"], default="affine", help="Type of registration"
