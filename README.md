@@ -139,8 +139,8 @@ If you use this code in your research, please cite:
 ```bibtex
 @article{paper,
   title={},
-  author={Your Name},
-  journal={Your Journal},
-  year={2024}
+  author={},
+  journal={},
+  year={2025}
 }
 ```
