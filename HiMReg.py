@@ -12,6 +12,7 @@ from affinemorph import AffineRegistration
 from data_load import Image
 from diffeomorph import DiffRegistration
 from losses import MutualInformation
+from CleanDIFT_feature import CleanDIFTFeatureExtractor
 
 
 class HiMReg:
@@ -23,6 +24,7 @@ class HiMReg:
         affine_iterations (list): List of iterations for affine registration.
         diff_scales (list): List of scales for diffeomorphic registration.
         diff_iterations (list): List of iterations for diffeomorphic registration.
+        init_affine_matrix (torch.Tensor): Initial affine transformation matrix.
         affine_kwargs (dict): Additional keyword arguments for affine registration. Defaults to {}.
         diff_kwargs (dict): Additional keyword arguments for diffeomorphic registration. Defaults to {}.
     """
@@ -36,6 +38,7 @@ class HiMReg:
         scale_dependent_lr,
         diff_scales,
         diff_iterations,
+        init_affine_matrix=None,
         affine_kwargs={},
         diff_kwargs={},
     ):
@@ -43,6 +46,7 @@ class HiMReg:
         self.moving_images = moving_images
         self.device = fixed_images.device
 
+        affine_kwargs["init_rigid"] = init_affine_matrix
         self.affine_registration = AffineRegistration(
             scales=affine_scales,
             iterations=affine_iterations,
@@ -141,12 +145,8 @@ class HiMReg:
 
 def get_args():
     parser = argparse.ArgumentParser(description="Multiscale cross modal image registration")
-    parser.add_argument(
-        "--fixed", type=str, default="data/register_kidney/NADH-4.tif", help="Path to fixed image"
-    )
-    parser.add_argument(
-        "--moving", type=str, default="data/register_kidney/postaf-4.tif", help="Path to moving image"
-    )
+    parser.add_argument("--fixed", type=str, default="data/K21/NADH-4.tif", help="Path to fixed image")
+    parser.add_argument("--moving", type=str, default="data/k21/postaf-4.tif", help="Path to moving image")
     parser.add_argument("--output", type=str, default="pred", help="Output directory")
     parser.add_argument("--affine_scales", nargs="+", type=int, default=[6, 4, 2, 1])
     parser.add_argument("--affine_iterations", nargs="+", type=int, default=[400, 400, 200, 200])
@@ -173,6 +173,23 @@ def main():
     fixed_image = Image.load_file(args.fixed, device=device)
     moving_image = Image.load_file(args.moving, device=device)
 
+    # --- Start of CleanDIFT ---
+    print("--- Starting Initial Alignment with CleanDIFT ---")
+    feature_extractor = CleanDIFTFeatureExtractor(device=device)
+    initial_affine_np = feature_extractor.get_initial_transform(fixed_image, moving_image)
+
+    initial_affine_torch = None
+    if initial_affine_np is not None:
+        # Convert 2x3 numpy matrix to a [1, 2, 3] torch tensor
+        initial_affine_torch = (
+            torch.from_numpy(initial_affine_np).unsqueeze(0).to(device=device, dtype=torch.float32)
+        )
+        print("Successfully computed initial transform.")
+    else:
+        print("Could not compute initial transform, starting with identity.")
+    print("--- Finished Initial Alignment ---")
+    # --- End of CleanDIFT Integration ---
+
     registration = HiMReg(
         fixed_images=fixed_image,
         moving_images=moving_image,
@@ -181,6 +198,7 @@ def main():
         scale_dependent_lr=args.scale_dependent_lr,
         diff_scales=args.diff_scales,
         diff_iterations=args.diff_iterations,
+        init_affine_matrix=initial_affine_torch,
         affine_kwargs={"loss_type": args.loss_type},
         diff_kwargs={"loss_type": args.loss_type},
     )
