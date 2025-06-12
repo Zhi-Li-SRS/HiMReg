@@ -177,7 +177,6 @@ def main():
         scale_dependent_lr=args.scale_dependent_lr,
         diff_scales=args.diff_scales,
         diff_iterations=args.diff_iterations,
-        init_affine_matrix=initial_affine_torch,
         affine_kwargs={"loss_type": args.loss_type},
         diff_kwargs={"loss_type": args.loss_type},
     )
