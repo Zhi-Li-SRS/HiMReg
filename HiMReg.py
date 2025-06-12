@@ -23,7 +23,6 @@ class HiMReg:
         affine_iterations (list): List of iterations for affine registration.
         diff_scales (list): List of scales for diffeomorphic registration.
         diff_iterations (list): List of iterations for diffeomorphic registration.
-        init_affine_matrix (torch.Tensor): Initial affine transformation matrix.
         affine_kwargs (dict): Additional keyword arguments for affine registration. Defaults to {}.
         diff_kwargs (dict): Additional keyword arguments for diffeomorphic registration. Defaults to {}.
     """
@@ -37,7 +36,6 @@ class HiMReg:
         scale_dependent_lr,
         diff_scales,
         diff_iterations,
-        init_affine_matrix=None,
         affine_kwargs={},
         diff_kwargs={},
     ):
@@ -45,7 +43,6 @@ class HiMReg:
         self.moving_images = moving_images
         self.device = fixed_images.device
 
-        affine_kwargs["init_rigid"] = init_affine_matrix
         self.affine_registration = AffineRegistration(
             scales=affine_scales,
             iterations=affine_iterations,
@@ -145,7 +142,7 @@ class HiMReg:
 def get_args():
     parser = argparse.ArgumentParser(description="Multiscale cross modal image registration")
     parser.add_argument("--fixed", type=str, default="data/K21/NADH-4.tif", help="Path to fixed image")
-    parser.add_argument("--moving", type=str, default="data/K21/postaf-4.tif", help="Path to moving image")
+    parser.add_argument("--moving", type=str, default="data/k21/postaf-4.tif", help="Path to moving image")
     parser.add_argument("--output", type=str, default="pred", help="Output directory")
     parser.add_argument("--affine_scales", nargs="+", type=int, default=[6, 4, 2, 1])
     parser.add_argument("--affine_iterations", nargs="+", type=int, default=[400, 400, 200, 200])
@@ -180,7 +177,7 @@ def main():
         scale_dependent_lr=args.scale_dependent_lr,
         diff_scales=args.diff_scales,
         diff_iterations=args.diff_iterations,
-        init_affine_matrix=None,
+        init_affine_matrix=initial_affine_torch,
         affine_kwargs={"loss_type": args.loss_type},
         diff_kwargs={"loss_type": args.loss_type},
     )
