@@ -8,9 +8,9 @@ from torch.nn import functional as F
 from torch.optim import SGD, Adam
 from tqdm import tqdm
 
-from data_load import Image
-from losses import LNCC, MutualInformation, DICELoss
-from utils import *
+from src.data_load import Image
+from src.losses import LNCC, MutualInformation, DICELoss
+from src.utils import *
 
 
 class AffineRegistration:
@@ -83,6 +83,10 @@ class AffineRegistration:
 
         # Initialize final transformation matrix
         self.final_affine_matrix = None
+
+        assert (
+            fixed_images.dims == moving_images.dims
+        ), f"Dimension mismatch: fixed={fixed_images.dims}D, moving={moving_images.dims}D"
 
     def validate_inputs(self, scales, iterations):
         """Validate input parameters."""

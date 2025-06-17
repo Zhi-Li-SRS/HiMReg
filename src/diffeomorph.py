@@ -1,15 +1,16 @@
+from typing import List, Optional, Tuple
+from collections import deque
 from copy import deepcopy
 from functools import partial
-from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.optim import SGD, Adam
 from tqdm import tqdm
 
-from losses import LNCC, MutualInformation
-from utils import *
+from src.losses import LNCC, MutualInformation
+from src.utils import *  
 
 
 class DiffRegistration:
@@ -83,11 +84,18 @@ class DiffRegistration:
         self.losses = deque(maxlen=max_tolerance_iters)
 
         # Initialize loss function
-        self.init_loss_function(loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params)
+        self.init_loss_function(
+            loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params
+        )
 
         # Initialize optimizer
         self.init_optimizer(
-            optimizer, optimizer_lr, optimizer_params, smooth_grad_sigma, smooth_warp_sigma, scales[0]
+            optimizer,
+            optimizer_lr,
+            optimizer_params,
+            smooth_grad_sigma,
+            smooth_warp_sigma,
+            scales[0],
         )
 
         # Initialize affine transformation
@@ -100,19 +108,30 @@ class DiffRegistration:
         if len(iterations) != len(scales):
             raise ValueError("Number of iterations must match number of scales")
 
-    def init_loss_function(self, loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params):
+    def init_loss_function(
+        self, loss_type, mi_kernel_type, cc_kernel_type, cc_kernel_size, loss_params
+    ):
         """Initialize loss function."""
         if loss_type == "mi":
             self.loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
         elif loss_type == "cc":
             self.loss_fn = LNCC(
-                kernel_type=cc_kernel_type, spatial_dims=self.dims, kernel_size=cc_kernel_size, **loss_params
+                kernel_type=cc_kernel_type,
+                spatial_dims=self.dims,
+                kernel_size=cc_kernel_size,
+                **loss_params,
             )
         else:
             raise ValueError(f"Loss type {loss_type} not supported")
 
     def init_optimizer(
-        self, optimizer, optimizer_lr, optimizer_params, smooth_grad_sigma, smooth_warp_sigma, init_scale
+        self,
+        optimizer,
+        optimizer_lr,
+        optimizer_params,
+        smooth_grad_sigma,
+        smooth_warp_sigma,
+        init_scale,
     ):
         """Initialize optimizer."""
         compositive_params = {
@@ -188,7 +207,9 @@ class DiffRegistration:
         fixed_t2p = self.fixed_images.get_pixel_to_physical()
         moving_p2t = self.moving_images.get_physical_to_pixel()
         fixed_size = fixed_arrays.shape[2:]
-        affine_map_init = torch.matmul(moving_p2t, torch.matmul(self.affine, fixed_t2p))[:, :-1]
+        affine_map_init = torch.matmul(
+            moving_p2t, torch.matmul(self.affine, fixed_t2p)
+        )[:, :-1]
 
         transformed_images = [] if save_transformed else None
         warp_gaussian = self.get_warp_gaussian()
@@ -205,7 +226,9 @@ class DiffRegistration:
             # Setup registration at current scale
             self.warp.update_field_size(size_down)
             fixed_image_affinecoords = F.affine_grid(
-                affine_map_init, fixed_image_down.shape, align_corners=self.align_corners
+                affine_map_init,
+                fixed_image_down.shape,
+                align_corners=self.align_corners,
             )
 
             pbar = tqdm(range(iters))
@@ -219,7 +242,10 @@ class DiffRegistration:
 
                 moved_coords = fixed_image_affinecoords + warp_field
                 moved_image = F.grid_sample(
-                    moving_image_blur, moved_coords, mode="bilinear", align_corners=self.align_corners
+                    moving_image_blur,
+                    moved_coords,
+                    mode="bilinear",
+                    align_corners=self.align_corners,
                 )
 
                 if self.loss_device is not None:
@@ -235,7 +261,9 @@ class DiffRegistration:
                 loss.backward()
                 self.warp.optimization_step()
 
-                pbar.set_description(f"scale: {scale}, iter: {i+1}/{iters}, loss: {loss.item():.4f}")
+                pbar.set_description(
+                    f"scale: {scale}, iter: {i + 1}/{iters}, loss: {loss.item():.4f}"
+                )
 
                 if self.converged(loss.item()):
                     break
@@ -253,20 +281,30 @@ class DiffRegistration:
             return []
         return [
             gaussian_1d(s, truncated=2)
-            for s in (torch.zeros(self.dims, device=self.device) + self.smooth_warp_sigma)
+            for s in (
+                torch.zeros(self.dims, device=self.device) + self.smooth_warp_sigma
+            )
         ]
 
     def prepare_images_for_scale(
-        self, fixed_arrays: torch.Tensor, moving_arrays: torch.Tensor, size_down: List[int], scale: int
+        self,
+        fixed_arrays: torch.Tensor,
+        moving_arrays: torch.Tensor,
+        size_down: List[int],
+        scale: int,
     ) -> tuple:
         """Prepare fixed and moving images for current scale."""
         if self.blur and scale > 1:
             sigmas = 0.5 * torch.tensor(
-                [sz / szdown for sz, szdown in zip(fixed_arrays.shape[2:], size_down)], device=self.device
+                [sz / szdown for sz, szdown in zip(fixed_arrays.shape[2:], size_down)],
+                device=self.device,
             )
             gaussians = [gaussian_1d(s, truncated=2) for s in sigmas]
             fixed_image_down = downsample(
-                fixed_arrays, size=size_down, mode=self.fixed_images.interpolate_mode, sigma=sigmas
+                fixed_arrays,
+                size=size_down,
+                mode=self.fixed_images.interpolate_mode,
+                sigma=sigmas,
             )
             moving_image_blur = seperate_filter(moving_arrays, gaussians)
         else:
@@ -291,7 +329,9 @@ class DiffRegistration:
         if self.final_coordinates is None:
             raise RuntimeError("Final coordinates not computed. Run optimize() first.")
 
-        transformed = F.grid_sample(moving_image, self.final_coordinates, mode="bilinear", align_corners=True)
+        transformed = F.grid_sample(
+            moving_image, self.final_coordinates, mode="bilinear", align_corners=True
+        )
         return transformed
 
 
@@ -345,8 +385,16 @@ class DiffOptimizer(nn.Module):
 
     def setup_transformation_indices(self):
         "Initialize permutation indices for image and vectors transformation"
-        self.permute_imgtov = (0, *range(2, self.n_dims + 2), 1)  # [B, C, H, W] -> [B, H, W, C]
-        self.permute_vtoimg = (0, self.n_dims + 1, *range(1, self.n_dims + 1))  # [B, H, W, C] -> [B, C, H, W]
+        self.permute_imgtov = (
+            0,
+            *range(2, self.n_dims + 2),
+            1,
+        )  # [B, C, H, W] -> [B, H, W, C]
+        self.permute_vtoimg = (
+            0,
+            self.n_dims + 1,
+            *range(1, self.n_dims + 1),
+        )  # [B, H, W, C] -> [B, C, H, W]
 
     def initialize_displacement_fields(self):
         """Initialize the forward and inverse displacement fields."""
@@ -367,7 +415,11 @@ class DiffOptimizer(nn.Module):
 
     def create_displacement_field(self, dimensions: List[int]):
         """Create a zero-initialized displacement field."""
-        d = torch.zeros([self.num_images, *dimensions, self.n_dims], dtype=torch.float32, device=self.device)
+        d = torch.zeros(
+            [self.num_images, *dimensions, self.n_dims],
+            dtype=torch.float32,
+            device=self.device,
+        )
         return d
 
     def create_inverse_field(self, dimensions: List[int]):
@@ -388,7 +440,8 @@ class DiffOptimizer(nn.Module):
         if self.smoothing_grad_sigma > 0:
             self.smoothing_grad_gaussians = [
                 gaussian_1d(s, truncated=2)
-                for s in torch.zeros(self.n_dims, device=self.device) + self.smoothing_grad_sigma
+                for s in torch.zeros(self.n_dims, device=self.device)
+                + self.smoothing_grad_sigma
             ]
             self.attach_gradient_hooks()
 
@@ -397,7 +450,8 @@ class DiffOptimizer(nn.Module):
         if self.smoothing_warp_sigma > 0:
             params["smoothing_gaussians"] = [
                 gaussian_1d(s, truncated=2)
-                for s in torch.zeros(self.n_dims, device=self.device) + self.smoothing_warp_sigma
+                for s in torch.zeros(self.n_dims, device=self.device)
+                + self.smoothing_warp_sigma
             ]
         params["optimize_inverse_warp"] = self.optimize_inverse_warp
         if self.optimize_inverse_warp:
@@ -424,7 +478,9 @@ class DiffOptimizer(nn.Module):
 
     def get_inverse_field(self):
         if self.optimize_inverse_warp:
-            invfield = compute_inverse_warp_displacement(self.warp.data, self.grid, self.inv, iters=20)
+            invfield = compute_inverse_warp_displacement(
+                self.warp.data, self.grid, self.inv, iters=20
+            )
         else:
             invfield = compute_inverse_warp_displacement(
                 self.warp.data, self.grid, -self.warp.data, iters=200
@@ -457,7 +513,10 @@ class DiffOptimizer(nn.Module):
     def interpolate_field(self, field: torch.Tensor, size: Tuple[int, ...], mode: str):
         """Helper method to interpolate displacement fields"""
         return F.interpolate(
-            field.detach().permute(*self.permute_vtoimg), size=size, mode=mode, align_corners=True
+            field.detach().permute(*self.permute_vtoimg),
+            size=size,
+            mode=mode,
+            align_corners=True,
         ).permute(*self.permute_imgtov)
 
 
@@ -493,7 +552,6 @@ class DiffAdam:
         smoothing_gaussians=None,
         optimize_inverse_warp=False,
     ):
-
         # initialize basic parameters
         self.n_dims = len(warp.shape) - 2
         self.batch_size = warp.shape[0]
@@ -530,11 +588,13 @@ class DiffAdam:
 
     def initialize_transformation_grid(self):
         """Initialize the transformation grid"""
-        self.affine_init = torch.eye(self.n_dims, self.n_dims + 1, device=self.warp.device)[None].expand(
-            self.batch_size, -1, -1
-        )
+        self.affine_init = torch.eye(
+            self.n_dims, self.n_dims + 1, device=self.warp.device
+        )[None].expand(self.batch_size, -1, -1)
         self.grid = F.affine_grid(
-            self.affine_init, [self.batch_size, 1, *self.warp.shape[1:-1]], align_corners=True
+            self.affine_init,
+            [self.batch_size, 1, *self.warp.shape[1:-1]],
+            align_corners=True,
         ).detach()  # grid is fixed and do not need any gradient
 
     def compute_moments(self, grad):
@@ -563,16 +623,20 @@ class DiffAdam:
         ).permute(*self.permute_imgtov)
 
         if self.smoothing_gaussians is not None:
-            w = seperate_filter(w.permute(*self.permute_vtoimg), self.smoothing_gaussians).permute(
-                *self.permute_imgtov
-            )
+            w = seperate_filter(
+                w.permute(*self.permute_vtoimg), self.smoothing_gaussians
+            ).permute(*self.permute_imgtov)
         return w
 
     def _optimize_inverse_warp(self, w):
         """Optimize the inverse warp field."""
         if self.optimize_inverse_warp and self.warpinv is not None:
-            invwarp = compute_inverse_warp_displacement(self.warp.data, self.grid, self.warpinv.data, iters=5)
-            warp_new = compute_inverse_warp_displacement(invwarp, self.grid, self.warp.data, iters=5)
+            invwarp = compute_inverse_warp_displacement(
+                self.warp.data, self.grid, self.warpinv.data, iters=5
+            )
+            warp_new = compute_inverse_warp_displacement(
+                invwarp, self.grid, self.warp.data, iters=5
+            )
             return warp_new, invwarp
         return w, None
 
@@ -590,7 +654,9 @@ class DiffAdam:
         Returns:
             ujac (Tensor): The gradient augmented with the Jacobian
         """
-        jac = jacobian(self.warp.data + self.grid, normalize=True)  # [B, dims, H, W, [D], dims]
+        jac = jacobian(
+            self.warp.data + self.grid, normalize=True
+        )  # [B, dims, H, W, [D], dims]
         if self.n_dims == 2:
             jac_reshape = jac.permute(0, 2, 3, 1, 4)
             u_reshape = u.unsqueeze(-2)
@@ -622,7 +688,11 @@ class DiffAdam:
         grad = self.compute_moments(grad)
 
         # Normalize the gradient using L2 norm
-        grad_norm = grad.view(grad.shape[0], -1).norm(p=2, dim=1).view(-1, *([1] * (grad.dim() - 1)))
+        grad_norm = (
+            grad.view(grad.shape[0], -1)
+            .norm(p=2, dim=1)
+            .view(-1, *([1] * (grad.dim() - 1)))
+        )
         grad_norm = torch.clamp(grad_norm, min=1e-8)
         normalized_grad = grad / grad_norm
 

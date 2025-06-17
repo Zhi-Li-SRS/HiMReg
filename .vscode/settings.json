@@ -1,5 +1,7 @@
 {
     "flake8.ignorePatterns": [
         "E501, F401, F403, F841, F405, E999"
-    ]
+    ],
+    "editor.fontSize": 14,
+    "jupyter.interactiveWindow.textEditor.executeSelection": true
 }

@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from utils import *
+from src.utils import *
 
 
 class MutualInformation(nn.Module):

@@ -12,9 +12,9 @@ from scipy.ndimage import gaussian_gradient_magnitude
 from skimage import feature
 from skimage.metrics import structural_similarity as ssim
 
-from data_load import Image
+from src.data_load import Image
 from HiMReg import HiMReg
-from losses import LNCC, MutualInformation
+from src.losses import LNCC, MutualInformation
 
 # Set global font settings
 plt.rcParams["font.family"] = "Arial"

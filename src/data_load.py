@@ -3,7 +3,7 @@ import SimpleITK as sitk
 import tifffile
 import torch
 
-from utils import integer_to_onehot
+from src.utils import integer_to_onehot
 
 
 class Image:
