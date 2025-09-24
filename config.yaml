@@ -11,9 +11,9 @@ io:
 affine:
   scales: [6, 4, 2, 1]               # Multi-resolution scales for affine registration
   iterations: [400, 200, 100, 50]   # Iterations per scale (must match length of scales)
-  scale_dependent_lr: [0.003, 0.001, 0.0005, 0.0003]  # Learning rates per scale
+  scale_dependent_lr: [0.003, 0.001, 0.0005, 0.0001]  # Learning rates per scale
   loss_type: "mi"                    # One of: "mi", "cc", "dice"
-  patience: 40                       # Iterations without improvement)
+  patience: 50                       # Iterations without improvement)
   min_delta: 1.0e-5                  # Minimum loss improvement to reset patience
 
 diff:
