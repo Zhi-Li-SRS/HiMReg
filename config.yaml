@@ -1,0 +1,27 @@
+# Update paths and parameters to match your dataset and registration strategy.
+runtime:
+  seed: 42
+  deterministic: true
+
+io:
+  fixed: "data/K21/NADH-4.tif"      # Path to the fixed/reference image
+  moving: "data/K21/postaf-4.tif"   # Path to the moving image to be aligned
+  output: "pred"                    # Directory where results are written
+
+affine:
+  scales: [6, 4, 2, 1]               # Multi-resolution scales for affine registration
+  iterations: [400, 200, 100, 50]   # Iterations per scale (must match length of scales)
+  scale_dependent_lr: [0.003, 0.001, 0.0005, 0.0003]  # Learning rates per scale
+  loss_type: "mi"                    # One of: "mi", "cc", "dice"
+  patience: 40                       # Iterations without improvement)
+  min_delta: 1.0e-5                  # Minimum loss improvement to reset patience
+
+diff:
+  scales: [8, 6, 4, 2, 1]            # Multi-resolution scales for diffeomorphic registration
+  iterations: [800, 600, 400, 100, 50]  # Iterations per scale (must match length of scales)
+  loss_type: "mi"                    # One of: "mi", "cc", "dice"
+  tolerance: 1.0e-4                  # Convergence slope threshold for early stopping
+  max_tolerance_iters: 60            # Sliding window size for convergence check
+
+registration:
+  register_type: "affine"              # Choose "affine" for affine-only or "diff" for full pipeline

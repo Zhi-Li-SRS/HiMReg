@@ -266,6 +266,9 @@ class DiffRegistration:
                 )
 
                 if self.converged(loss.item()):
+                    print(
+                        f"Early stopping at scale {scale} after {i + 1} iterations"
+                    )
                     break
 
             self.final_coordinates = fixed_image_affinecoords + warp_field

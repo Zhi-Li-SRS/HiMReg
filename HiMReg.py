@@ -9,6 +9,7 @@ from src.affinemorph import AffineRegistration
 from src.data_load import Image
 from src.diffeomorph import DiffRegistration
 from src.config import load_config
+from src.utils import set_global_seed
 
 
 class HiMReg:
@@ -33,20 +34,29 @@ class HiMReg:
         scale_dependent_lr,
         diff_scales,
         diff_iterations,
-        affine_kwargs={},
-        diff_kwargs={},
+        affine_kwargs=None,
+        diff_kwargs=None,
     ):
         self.fixed_images = fixed_images
         self.moving_images = moving_images
         self.device = fixed_images.device
+
+        affine_kwargs = dict(affine_kwargs or {})
+        diff_kwargs = dict(diff_kwargs or {})
+
+        patience = affine_kwargs.pop("patience", 50)
+        min_delta = affine_kwargs.pop("min_delta", 1e-5)
+
+        tolerance = diff_kwargs.pop("tolerance", 1e-3)
+        max_tolerance_iters = diff_kwargs.pop("max_tolerance_iters", 1000)
 
         self.affine_registration = AffineRegistration(
             scales=affine_scales,
             iterations=affine_iterations,
             fixed_images=fixed_images,
             moving_images=moving_images,
-            patience=50,
-            min_delta=1e-5,
+            patience=patience,
+            min_delta=min_delta,
             scale_dependent_lr=scale_dependent_lr,  # Scale-specific learning rates
             **affine_kwargs,
         )
@@ -56,6 +66,8 @@ class HiMReg:
             iterations=diff_iterations,
             fixed_images=fixed_images,
             moving_images=moving_images,
+            tolerance=tolerance,
+            max_tolerance_iters=max_tolerance_iters,
             **diff_kwargs,
         )
 
@@ -80,43 +92,33 @@ class HiMReg:
         batch_size = self.fixed_images.size()
         input_shape = [batch_size, 1, *original_size]  # [B, C, H, W]
 
-        affine_transformed = self.affine_registration.optimize(
-            save_transformed=save_transformed
-        )
+        affine_transformed = self.affine_registration.optimize(save_transformed=save_transformed)
         affine_matrix = self.affine_registration.get_final_transform()
 
         if register_type == "affine":
-            affine_coords = F.affine_grid(
-                affine_matrix[:, :-1], input_shape, align_corners=True
-            )
-            affine_transformed = self._upsample_transformed_images(
-                affine_transformed, original_size
-            )
+            affine_coords = F.affine_grid(affine_matrix[:, :-1], input_shape, align_corners=True)
+            affine_transformed = self._upsample_transformed_images(affine_transformed, original_size)
             return affine_transformed, None, affine_coords
 
         # Diffeomorphic registration
         affine_result = affine_transformed[-1].squeeze().detach().cpu().numpy()
         self.diff_registration.moving_images = Image(affine_result, device=self.device)
         self.diff_registration.init_affine = affine_matrix
-        diff_transformed = self.diff_registration.optimize(
-            save_transformed=save_transformed
-        )
+        diff_transformed = self.diff_registration.optimize(save_transformed=save_transformed)
         final_coordinates = self.diff_registration.get_final_coordinates()
         if final_coordinates is not None:
             current_size = final_coordinates.shape[1:-1]
             if current_size != original_size:
                 final_coordinates = F.interpolate(
-                    final_coordinates.permute(
-                        0, 3, 1, 2
-                    ),  # [B, H, W, 2] -> [B, 2, H, W]
+                    final_coordinates.permute(0, 3, 1, 2),  # [B, H, W, 2] -> [B, 2, H, W]
                     size=original_size,
                     mode="bilinear",
                     align_corners=True,
-                ).permute(0, 2, 3, 1)  # [B, 2, H, W] -> [B, H, W, 2]
+                ).permute(
+                    0, 2, 3, 1
+                )  # [B, 2, H, W] -> [B, H, W, 2]
 
-            diff_transformed = self._upsample_transformed_images(
-                diff_transformed, original_size
-            )
+            diff_transformed = self._upsample_transformed_images(diff_transformed, original_size)
         return affine_transformed, diff_transformed, final_coordinates
 
     def _upsample_transformed_images(self, transformed_images, target_size):
@@ -139,7 +141,9 @@ class HiMReg:
                 size=image.shape[2:],
                 mode="bilinear",
                 align_corners=True,
-            ).permute(0, 2, 3, 1)  # Back to [B, H, W, 2]
+            ).permute(
+                0, 2, 3, 1
+            )  # Back to [B, H, W, 2]
 
         transformed = F.grid_sample(image, coords, mode="bilinear", align_corners=True)
         return transformed
@@ -149,8 +153,12 @@ def main(config_path: str = "config.yaml"):
     """Main function for HiMReg image registration."""
     # Load configuration
     config_manager = load_config(config_path)
-    config = config_manager.config
-    
+    affine_cfg = config_manager.affine_config
+    diff_cfg = config_manager.diff_config
+
+    # Ensure reproducibility
+    set_global_seed(config_manager.seed, config_manager.deterministic)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -160,19 +168,19 @@ def main(config_path: str = "config.yaml"):
         moving_image = Image.load_file(config_manager.moving_image_path, device=device)
         print(f"Loaded fixed image: {config_manager.fixed_image_path}")
         print(f"Loaded moving image: {config_manager.moving_image_path}")
-    except Exception as e:
-        print(f"Error loading images: {e}")
+    except Exception as exc:
+        print(f"Error loading images: {exc}")
         return
 
     # Create HiMReg instance
     registration = HiMReg(
         fixed_images=fixed_image,
         moving_images=moving_image,
-        affine_scales=config['affine']['scales'],
-        affine_iterations=config['affine']['iterations'],
-        scale_dependent_lr=config['affine']['scale_dependent_lr'],
-        diff_scales=config['diff']['scales'],
-        diff_iterations=config['diff']['iterations'],
+        affine_scales=affine_cfg["scales"],
+        affine_iterations=affine_cfg["iterations"],
+        scale_dependent_lr=affine_cfg["scale_dependent_lr"],
+        diff_scales=diff_cfg["scales"],
+        diff_iterations=diff_cfg["iterations"],
         affine_kwargs=config_manager.get_affine_kwargs(),
         diff_kwargs=config_manager.get_diff_kwargs(),
     )
@@ -192,25 +200,19 @@ def main(config_path: str = "config.yaml"):
 
     # Save results
     if affine_transformed:
-        affine_pred_path = os.path.join(
-            output_dir, f"{moving_basename}_affine.tif"
-        )
+        affine_pred_path = os.path.join(output_dir, f"{moving_basename}_affine.tif")
         last_affine_image = affine_transformed[-1].squeeze().detach().cpu().numpy()
         io.imsave(affine_pred_path, last_affine_image)
         print(f"Saved affine result: {affine_pred_path}")
 
     if diff_transformed:
-        diff_pred_path = os.path.join(
-            output_dir, f"{moving_basename}_diff.tif"
-        )
+        diff_pred_path = os.path.join(output_dir, f"{moving_basename}_diff.tif")
         last_diff_image = diff_transformed[-1].squeeze().detach().cpu().numpy()
         io.imsave(diff_pred_path, last_diff_image)
         print(f"Saved diffeomorphic result: {diff_pred_path}")
 
     if final_coordinates is not None:
-        coords_pred_path = os.path.join(
-            output_dir, f"{moving_basename}_coords.npy"
-        )
+        coords_pred_path = os.path.join(output_dir, f"{moving_basename}_coords.npy")
         final_coords_np = final_coordinates.detach().cpu().numpy()
         np.save(coords_pred_path, final_coords_np)
         print(f"Saved coordinates: {coords_pred_path}")

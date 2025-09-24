@@ -15,7 +15,10 @@ from scipy import ndimage
 from skimage import feature, morphology
 from torchvision.transforms.functional import to_tensor
 
+from src.utils import set_global_seed
+
 # Setup loguru logging
+set_global_seed(42, deterministic=True)
 logger.remove()  # Remove default handler
 logger.add(
     "cleandift.log",

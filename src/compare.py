@@ -15,6 +15,7 @@ from skimage.metrics import structural_similarity as ssim
 from src.data_load import Image
 from HiMReg import HiMReg
 from src.losses import LNCC, MutualInformation
+from src.utils import set_global_seed
 
 # Set global font settings
 plt.rcParams["font.family"] = "Arial"
@@ -359,15 +360,21 @@ def get_args():
     parser.add_argument(
         "--device", type=str, default="cuda", choices=["cuda", "cpu"], help="Device to run on"
     )
-    parser.add_argument("--batch_size", type=int, default=4, help="Device to run on")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for batched evaluation")
     parser.add_argument(
         "--register_type", type=str, default="affine", choices=["affine", "diff"], help="Type of registration"
     )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--deterministic", dest="deterministic", action="store_true", help="Force deterministic algorithms")
+    parser.add_argument("--no-deterministic", dest="deterministic", action="store_false", help="Allow non-deterministic CUDA kernels")
+    parser.set_defaults(deterministic=True)
     return parser.parse_args()
 
 
 def main():
     args = get_args()
+
+    set_global_seed(args.seed, args.deterministic)
 
     comparison = RegistrationComparison(
         fixed_path=args.fixed,

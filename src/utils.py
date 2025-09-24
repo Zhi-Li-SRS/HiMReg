@@ -1,11 +1,36 @@
 from collections import deque
 
+import os
+import random
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy import ndimage
 from torchvision import transforms
+
+
+def set_global_seed(seed: int, deterministic: bool = True) -> None:
+    """Seed Python, NumPy, and PyTorch for reproducible runs."""
+
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    else:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
 def image_gradient_singlechannel(image, normalize=False):
