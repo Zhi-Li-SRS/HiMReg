@@ -4,8 +4,8 @@ runtime:
   deterministic: true
 
 io:
-  fixed: "data/K21/NADH-4.tif"      # Path to the fixed/reference image
-  moving: "data/K21/postaf-4.tif"   # Path to the moving image to be aligned
+  fixed: "data/K21/NADH-1.tif"      # Path to the fixed/reference image
+  moving: "data/K21/postaf-1.tif"   # Path to the moving image to be aligned
   output: "pred"                    # Directory where results are written
 
 affine:
@@ -13,8 +13,8 @@ affine:
   iterations: [400, 200, 100, 50]   # Iterations per scale (must match length of scales)
   scale_dependent_lr: [0.003, 0.001, 0.0005, 0.0001]  # Learning rates per scale
   loss_type: "mi"                    # One of: "mi", "cc", "dice"
-  patience: 50                       # Iterations without improvement)
-  min_delta: 1.0e-5                  # Minimum loss improvement to reset patience
+  patience: 30                       # Iterations without improvement)
+  min_delta: 1.0e-4                  # Minimum loss improvement to reset patience
 
 diff:
   scales: [8, 6, 4, 2, 1]            # Multi-resolution scales for diffeomorphic registration
@@ -24,4 +24,4 @@ diff:
   max_tolerance_iters: 60            # Sliding window size for convergence check
 
 registration:
-  register_type: "affine"              # Choose "affine" for affine-only or "diff" for full pipeline
+  register_type: "diff"              # Choose "affine" for affine-only or "diff" for full pipeline
