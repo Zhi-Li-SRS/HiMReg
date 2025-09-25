@@ -9,7 +9,7 @@ from src.affinemorph import AffineRegistration
 from src.data_load import Image
 from src.diffeomorph import DiffRegistration
 from src.config import load_config
-from src.utils import set_global_seed
+from src.utils import save_registration_overlay, set_global_seed
 
 
 class HiMReg:
@@ -216,6 +216,43 @@ def main(config_path: str = "config.yaml"):
         final_coords_np = final_coordinates.detach().cpu().numpy()
         np.save(coords_pred_path, final_coords_np)
         print(f"Saved coordinates: {coords_pred_path}")
+
+    # Save before/after overlay comparison
+    fixed_tensor = fixed_image()
+    moving_tensor = moving_image()
+
+    warped_tensor = None
+    if diff_transformed:
+        warped_tensor = diff_transformed[-1]
+    elif affine_transformed:
+        warped_tensor = affine_transformed[-1]
+
+    if warped_tensor is not None:
+        if moving_tensor.shape[2:] != fixed_tensor.shape[2:]:
+            moving_tensor = F.interpolate(
+                moving_tensor,
+                size=fixed_tensor.shape[2:],
+                mode=fixed_image.interpolate_mode,
+                align_corners=True,
+            )
+
+        if warped_tensor.shape[2:] != fixed_tensor.shape[2:]:
+            warped_tensor = F.interpolate(
+                warped_tensor,
+                size=fixed_tensor.shape[2:],
+                mode=fixed_image.interpolate_mode,
+                align_corners=True,
+            )
+
+        overlay_path = os.path.join(output_dir, f"{moving_basename}_overlay.png")
+
+        save_registration_overlay(
+            fixed_image=fixed_tensor,
+            moving_before=moving_tensor,
+            moving_after=warped_tensor,
+            output_path=overlay_path,
+        )
+        print(f"Saved overlay comparison: {overlay_path}")
 
     print(f"Registration complete. Results saved in {config_manager.output_dir}")
 

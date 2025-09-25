@@ -3,6 +3,7 @@ from collections import deque
 import os
 import random
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -31,6 +32,81 @@ def set_global_seed(seed: int, deterministic: bool = True) -> None:
     else:
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
+
+
+def _tensor_to_numpy(image) -> np.ndarray:
+    """Convert a tensor/array to 2D numpy array."""
+
+    if isinstance(image, torch.Tensor):
+        tensor = image.detach().cpu()
+        if tensor.ndim == 4:
+            tensor = tensor[0]
+        if tensor.ndim == 3:
+            tensor = tensor[0]
+        array = tensor.numpy()
+    elif isinstance(image, np.ndarray):
+        array = image
+    else:
+        raise TypeError("Expected torch.Tensor or np.ndarray for image data")
+
+    array = np.asarray(array, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError("Overlay images must be 2D arrays after channel/batch selection")
+    return array
+
+
+def _normalize_array(array: np.ndarray) -> np.ndarray:
+    array_min = float(array.min())
+    array_max = float(array.max())
+    if array_max > array_min:
+        return (array - array_min) / (array_max - array_min)
+    return np.zeros_like(array, dtype=np.float32)
+
+
+def _build_overlay(fixed, moving, alpha: float = 0.7) -> np.ndarray:
+    fixed_norm = _normalize_array(fixed)
+    moving_norm = _normalize_array(moving)
+
+    base = ((fixed_norm + moving_norm) / 2.0) * (1.0 - alpha)
+    overlay = np.stack(
+        [
+            np.clip(base + moving_norm * alpha, 0.0, 1.0),
+            np.clip(base, 0.0, 1.0),
+            np.clip(base + fixed_norm * alpha, 0.0, 1.0),
+        ],
+        axis=-1,
+    )
+    return overlay
+
+
+def save_registration_overlay(
+    fixed_image, moving_before, moving_after, output_path: str, titles=("Before", "After"), alpha: float = 0.7
+) -> None:
+    """Save side-by-side overlays of fixed vs moving images before/after registration."""
+
+    fixed_np = _tensor_to_numpy(fixed_image)
+    before_np = _tensor_to_numpy(moving_before)
+    after_np = _tensor_to_numpy(moving_after)
+
+    if fixed_np.shape != before_np.shape:
+        raise ValueError("Fixed and moving-before images must share the same spatial shape")
+    if fixed_np.shape != after_np.shape:
+        raise ValueError("Fixed and moving-after images must share the same spatial shape")
+
+    overlays = [
+        _build_overlay(fixed_np, before_np, alpha=alpha),
+        _build_overlay(fixed_np, after_np, alpha=alpha),
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(8, 5))
+    for ax, img, title in zip(axes, overlays, titles):
+        ax.imshow(img)
+        ax.set_title(title)
+        ax.axis("off")
+
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
 
 
 def image_gradient_singlechannel(image, normalize=False):
