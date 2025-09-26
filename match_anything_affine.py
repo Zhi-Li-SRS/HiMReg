@@ -339,7 +339,7 @@ def parse_args() -> argparse.Namespace:
         help="Moving image path (PNG/JPEG/TIFF/OME-TIFF)",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default="matchanything_affine_outputs", help="Directory for outputs"
+        "--output-dir", type=Path, default="matchanything_outputs", help="Directory for outputs"
     )
     parser.add_argument(
         "--device",
