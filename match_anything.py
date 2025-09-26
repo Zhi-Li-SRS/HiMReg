@@ -13,8 +13,6 @@ from src.utils import save_registration_overlay
 
 MODEL_ID = "zju-community/matchanything_eloftr"
 
-_CV2_SUPPORTED_DTYPES = {np.uint8, np.int8, np.uint16, np.int16, np.int32, np.float32, np.float64}
-
 
 def _normalize_to_uint8(array: np.ndarray):
     """Normalize an array to uint8."""
@@ -85,8 +83,6 @@ def _prepare_array_for_warp(arr: np.ndarray):
         metadata["leading_shape"] = leading_shape
         prepared = np.moveaxis(arr.reshape(channel_dim, H, W), 0, -1)
     prepared = np.ascontiguousarray(prepared)
-    if prepared.dtype not in _CV2_SUPPORTED_DTYPES:
-        prepared = prepared.astype(np.float32)
     return prepared, metadata
 
 
@@ -210,7 +206,7 @@ def run_registration(
     processor = AutoImageProcessor.from_pretrained(MODEL_ID, use_fast=False)
     model = AutoModelForKeypointMatching.from_pretrained(MODEL_ID).to(device).eval()
 
-    fixed_img, fixed_raw = _load_image(fixed_path)
+    fixed_img, _ = _load_image(fixed_path)
     moving_img, moving_raw = _load_image(moving_path)
     moving_prepared, moving_meta = _prepare_array_for_warp(moving_raw)
 
