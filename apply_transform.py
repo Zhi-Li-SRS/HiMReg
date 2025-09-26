@@ -1,10 +1,6 @@
-#!/usr/bin/env python
 """Apply saved deformation coordinates to one or more 2D images."""
 
-from __future__ import annotations
-
 import argparse
-import os
 from pathlib import Path
 from typing import Iterable, List
 
@@ -15,7 +11,7 @@ import tifffile
 from skimage import io
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Warp image(s) using pre-computed deformation coordinates (coords.npy)."
     )
@@ -23,13 +19,13 @@ def parse_args() -> argparse.Namespace:
         "--images",
         "-i",
         nargs="+",
-        required=True,
+        default=["data/maldi/redox_rescale.tif"],
         help="Path(s) to image files to be warped. Channels can be separate files or within one file.",
     )
     parser.add_argument(
         "--coords",
         "-c",
-        required=True,
+        default="pred/maldi/redox_rescale_coords.npy",
         help="Path to coords.npy containing the deformation grid (shape [H,W,2] or [1,H,W,2]).",
     )
     parser.add_argument(
@@ -56,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--padding-mode",
         choices=["zeros", "border", "reflection"],
-        default="border",
-        help="Padding mode used when sampling outside the image domain.",
+        default="zeros",
+        help=("Padding mode when采样落在图像外边界时的策略，默认保持与训练时一致的'zeros'"),
     )
     parser.add_argument(
         "--device",
@@ -73,6 +69,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _read_image(path: Path) -> np.ndarray:
+    """Read an image from a file."""
     suffix = path.suffix.lower()
     if suffix in {".tif", ".tiff"}:
         return tifffile.imread(path)
@@ -94,17 +91,14 @@ def _to_channel_first(array: np.ndarray, layout: str) -> np.ndarray:
             return array
         if layout == "last":
             return np.moveaxis(array, -1, 0)
-        # auto mode heuristics: treat as channel-first when first dim small.
         if array.shape[0] <= 4 and array.shape[0] <= array.shape[-1]:
             return array
         return np.moveaxis(array, -1, 0)
-    raise ValueError(
-        "Only 2D images are supported. Received array with shape " f"{array.shape}."
-    )
+    raise ValueError("Only 2D images are supported. Received array with shape " f"{array.shape}.")
 
 
-def load_images(image_paths: Iterable[str], layout: str, device: torch.device) -> torch.Tensor:
-    tensors: List[torch.Tensor] = []
+def load_images(image_paths: Iterable[str], layout: str, device: torch.device):
+    tensors = []
     height = width = None
 
     for path_str in image_paths:
@@ -113,10 +107,10 @@ def load_images(image_paths: Iterable[str], layout: str, device: torch.device) -
             raise FileNotFoundError(f"Image file '{path}' not found.")
         array = _read_image(path)
         array = np.asarray(array)
-        if array.ndim not in {2, 3}:
-            raise ValueError(
-                f"Unsupported image rank for '{path}'. Expected 2D or 3D array, got shape {array.shape}."
-            )
+        assert array.ndim in {
+            2,
+            3,
+        }, f"Unsupported image rank for '{path}'. Expected 2D or 3D array, got shape {array.shape}."
         channel_first = _to_channel_first(array, layout)
         if height is None:
             height, width = channel_first.shape[-2:]
@@ -132,7 +126,8 @@ def load_images(image_paths: Iterable[str], layout: str, device: torch.device) -
     return stacked.unsqueeze(0)  # add batch dimension
 
 
-def load_coords(coords_path: str, device: torch.device) -> torch.Tensor:
+def load_coords(coords_path: str, device: torch.device):
+    """Load coordinates from a file."""
     path = Path(coords_path)
     if not path.exists():
         raise FileNotFoundError(f"Coords file '{path}' not found.")
@@ -150,27 +145,20 @@ def load_coords(coords_path: str, device: torch.device) -> torch.Tensor:
     return torch.from_numpy(coords).to(device)
 
 
-def maybe_resize_coords(coords: torch.Tensor, spatial_size: torch.Size, align_corners: bool) -> torch.Tensor:
+def _resize_coords(coords: torch.Tensor, spatial_size: torch.Size, align_corners: bool):
+    """Resize coordinates to match the spatial size of the image."""
     if coords.shape[1:3] == tuple(spatial_size):
         return coords
 
     coords_permuted = coords.permute(0, 3, 1, 2)
-    resized = F.interpolate(
-        coords_permuted,
-        size=spatial_size,
-        mode="bilinear",
-        align_corners=align_corners,
-    )
+    resized = F.interpolate(coords_permuted, size=spatial_size, mode="bilinear", align_corners=align_corners)
     return resized.permute(0, 2, 3, 1)
 
 
 def apply_transform(
-    image: torch.Tensor,
-    coords: torch.Tensor,
-    mode: str,
-    padding_mode: str,
-    align_corners: bool,
-) -> torch.Tensor:
+    image: torch.Tensor, coords: torch.Tensor, mode: str, padding_mode: str, align_corners: bool
+):
+    """Apply the transformation to the image or images."""
     if coords.size(0) == 1 and image.size(0) > 1:
         coords = coords.expand(image.size(0), -1, -1, -1)
     elif coords.size(0) != image.size(0):
@@ -179,12 +167,14 @@ def apply_transform(
             f"Image batch: {image.size(0)}, Coords batch: {coords.size(0)}."
         )
 
-    coords = maybe_resize_coords(coords, image.shape[2:], align_corners)
+    # Resize coordinates to match the spatial size of the image if needed
+    coords = _resize_coords(coords, image.shape[2:], align_corners)
     warped = F.grid_sample(image, coords, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
     return warped
 
 
-def save_tensor(tensor: torch.Tensor, output_path: str) -> None:
+def save_tensor(tensor: torch.Tensor, output_path: str):
+    """Save a tensor to a file."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
