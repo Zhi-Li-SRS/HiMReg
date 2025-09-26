@@ -1,7 +1,7 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 import cv2
 import numpy as np
@@ -12,6 +12,8 @@ from transformers import AutoImageProcessor, AutoModelForKeypointMatching
 from src.utils import save_registration_overlay
 
 MODEL_ID = "zju-community/matchanything_eloftr"
+
+_CV2_SUPPORTED_DTYPES = {np.uint8, np.int8, np.uint16, np.int16, np.int32, np.float32, np.float64}
 
 
 def _normalize_to_uint8(array: np.ndarray):
@@ -58,14 +60,59 @@ def _array_to_pil(image_array: np.ndarray):
 
 
 def _load_image(path: Path):
-    """Load an image from a path."""
+    """Load an image from a path and return both PIL RGB proxy and original array."""
     lower = path.name.lower()
     if lower.endswith((".ome.tif", ".ome.tiff", ".tif", ".tiff")):
         array = tifffile.imread(path)
-        return _array_to_pil(array)
-    with Image.open(path) as pil_img:
-        array = np.asarray(pil_img)
-    return _array_to_pil(array)
+    else:
+        with Image.open(path) as pil_img:
+            array = np.asarray(pil_img)
+    pil_image = _array_to_pil(array)
+    return pil_image, np.asarray(array)
+
+
+def _prepare_array_for_warp(arr: np.ndarray):
+    """Rearrange array so spatial axes are last two dims (H,W) with optional channel dim."""
+    if arr.ndim < 2:
+        raise ValueError("Input array must have at least two dimensions (H, W)")
+    metadata = {"orig_shape": arr.shape, "dtype": arr.dtype}
+    H, W = arr.shape[-2:]
+    leading_shape = arr.shape[:-2]
+    if not leading_shape:
+        prepared = arr
+    else:
+        channel_dim = int(np.prod(leading_shape))
+        metadata["leading_shape"] = leading_shape
+        prepared = np.moveaxis(arr.reshape(channel_dim, H, W), 0, -1)
+    prepared = np.ascontiguousarray(prepared)
+    if prepared.dtype not in _CV2_SUPPORTED_DTYPES:
+        prepared = prepared.astype(np.float32)
+    return prepared, metadata
+
+
+def _restore_array_from_warp(warped: np.ndarray, metadata: Dict[str, Any]):
+    """Restore warped array back to original shape using stored metadata."""
+    dtype = metadata["dtype"]
+    orig_shape = metadata["orig_shape"]
+    if "leading_shape" not in metadata:
+        return warped.astype(dtype, copy=False).reshape(orig_shape)
+    leading_shape = metadata["leading_shape"]
+    H, W = orig_shape[-2:]
+    restored = np.moveaxis(warped, -1, 0).reshape(leading_shape + (H, W))
+    return restored.astype(dtype, copy=False)
+
+
+def _warp_array_homography(
+    array: np.ndarray,
+    H: np.ndarray,
+    fixed_width: int,
+    fixed_height: int,
+    interpolation: int = cv2.INTER_LINEAR,
+):
+    """Warp an array (H,W[,C]) with a homography, preserving dtype."""
+    return cv2.warpPerspective(
+        array, H, (fixed_width, fixed_height), flags=interpolation, borderMode=cv2.BORDER_CONSTANT
+    )
 
 
 def _tensor_to_numpy(tensor: torch.Tensor) -> np.ndarray:
@@ -88,9 +135,9 @@ def _compute_matches(
     inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
         outputs = model(**inputs)
-    image_sizes = [[(img.height, img.width) for img in images]]
+    target_sizes = [tuple((img.height, img.width) for img in images)]
     processed = processor.post_process_keypoint_matching(
-        outputs, image_sizes=image_sizes, threshold=match_threshold
+        outputs, target_sizes=target_sizes, threshold=match_threshold
     )[0]
     keypoints_fixed = _tensor_to_numpy(processed["keypoints0"])
     keypoints_moving = _tensor_to_numpy(processed["keypoints1"])
@@ -124,11 +171,11 @@ def _estimate_homography(
     return H.astype(np.float32), inlier_mask
 
 
-def _warp_moving(moving_img: Image.Image, H: np.ndarray, fixed_width: int, fixed_height: int):
-    """Warp a moving image using a homography."""
+def _warp_rgb_preview(moving_img: Image.Image, H: np.ndarray, fixed_width: int, fixed_height: int):
+    """Warp an RGB proxy image for visualization outputs."""
 
     moving_np = np.asarray(moving_img, dtype=np.uint8)
-    warped = cv2.warpPerspective(
+    return cv2.warpPerspective(
         moving_np,
         H,
         (fixed_width, fixed_height),
@@ -136,7 +183,6 @@ def _warp_moving(moving_img: Image.Image, H: np.ndarray, fixed_width: int, fixed
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
-    return warped
 
 
 def _prepare_grayscale(image: Image.Image, target_shape: Tuple[int, int]):
@@ -161,11 +207,12 @@ def run_registration(
     """Run registration."""
 
     device = torch.device(device_str)
-    processor = AutoImageProcessor.from_pretrained(MODEL_ID)
+    processor = AutoImageProcessor.from_pretrained(MODEL_ID, use_fast=False)
     model = AutoModelForKeypointMatching.from_pretrained(MODEL_ID).to(device).eval()
 
-    fixed_img = _load_image(fixed_path)
-    moving_img = _load_image(moving_path)
+    fixed_img, fixed_raw = _load_image(fixed_path)
+    moving_img, moving_raw = _load_image(moving_path)
+    moving_prepared, moving_meta = _prepare_array_for_warp(moving_raw)
 
     keypoints_fixed, keypoints_moving, scores = _compute_matches(
         processor, model, fixed_img, moving_img, device, match_threshold
@@ -176,11 +223,15 @@ def run_registration(
     )
 
     fixed_width, fixed_height = fixed_img.width, fixed_img.height
-    warped_rgb = _warp_moving(moving_img, H, fixed_width, fixed_height)
+    warped_rgb = _warp_rgb_preview(moving_img, H, fixed_width, fixed_height)
+    warped_prepared = _warp_array_homography(
+        moving_prepared, H, fixed_width, fixed_height, interpolation=cv2.INTER_LINEAR
+    )
+    warped_raw = _restore_array_from_warp(warped_prepared, moving_meta)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     warped_path = output_dir / "moving_transformed.tiff"
-    Image.fromarray(warped_rgb).save(warped_path, format="TIFF")
+    tifffile.imwrite(warped_path, warped_raw)
 
     keypoints_fixed_inliers = keypoints_fixed[inlier_mask]
     keypoints_moving_inliers = keypoints_moving[inlier_mask]
@@ -272,7 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ransac-threshold",
         type=float,
-        default=3.0,
+        default=5.0,
         help="RANSAC re-projection threshold (pixels, default: 3.0)",
     )
     parser.add_argument(
