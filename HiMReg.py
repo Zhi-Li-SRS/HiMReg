@@ -244,7 +244,7 @@ def main(config_path: str = "config.yaml"):
                 align_corners=True,
             )
 
-        overlay_path = os.path.join(output_dir, f"{moving_basename}_overlay.png")
+        overlay_path = os.path.join(output_dir, f"{moving_basename}_diff_overlay.png")
 
         save_registration_overlay(
             fixed_image=fixed_tensor,

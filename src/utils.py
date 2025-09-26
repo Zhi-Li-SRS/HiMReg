@@ -67,15 +67,12 @@ def _build_overlay(fixed, moving, alpha: float = 0.7) -> np.ndarray:
     fixed_norm = _normalize_array(fixed)
     moving_norm = _normalize_array(moving)
 
-    base = ((fixed_norm + moving_norm) / 2.0) * (1.0 - alpha)
-    overlay = np.stack(
-        [
-            np.clip(base + moving_norm * alpha, 0.0, 1.0),
-            np.clip(base, 0.0, 1.0),
-            np.clip(base + fixed_norm * alpha, 0.0, 1.0),
-        ],
-        axis=-1,
-    )
+    G = fixed_norm
+    B = fixed_norm
+
+    R = np.clip(fixed_norm + alpha * moving_norm, 0.0, 1.0)
+
+    overlay = np.stack([R, G, B], axis=-1)  # [H,W,3]
     return overlay
 
 
