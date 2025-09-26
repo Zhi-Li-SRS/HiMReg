@@ -4,8 +4,8 @@ runtime:
   deterministic: true
 
 io:
-  fixed: "data/K21/NADH-1.tif"      # Path to the fixed/reference image
-  moving: "data/K21/postaf-1.tif"   # Path to the moving image to be aligned
+  fixed: "data/maldi/he_rescale.tif"      # Path to the fixed/reference image
+  moving: "data/maldi/redox_rescale.tif"   # Path to the moving image to be aligned
   output: "pred"                    # Directory where results are written
 
 affine:
@@ -17,11 +17,11 @@ affine:
   min_delta: 1.0e-4                  # Minimum loss improvement to reset patience
 
 diff:
-  scales: [8, 6, 4, 2, 1]            # Multi-resolution scales for diffeomorphic registration
-  iterations: [800, 600, 400, 100, 50]  # Iterations per scale (must match length of scales)
+  scales: [6, 4, 2, 1]            # Multi-resolution scales for diffeomorphic registration
+  iterations: [400, 200, 100, 50]  # Iterations per scale (must match length of scales)
   loss_type: "mi"                    # One of: "mi", "cc", "dice"
   tolerance: 1.0e-4                  # Convergence slope threshold for early stopping
-  max_tolerance_iters: 60            # Sliding window size for convergence check
+  max_tolerance_iters: 30            # Sliding window size for convergence check
 
 registration:
   register_type: "diff"              # Choose "affine" for affine-only or "diff" for full pipeline
