@@ -1,11 +1,5 @@
 #!/usr/bin/env python
 """Generate publication-quality figures from benchmark results.
-
-Reads .tif images and metrics.csv from compare.py output, produces:
-  1. Individual overlay PNGs per ROI (no titles, no borders)
-  2. A 2x4 metrics bar chart (SVG) following Nature Communications style
-  3. A one-row legend (SVG) matching the metrics chart
-
 Usage:
     python scripts/make_figures.py --results-dir comparison_results/benchmark
 """
@@ -36,46 +30,49 @@ try:
 except Exception:
     matplotlib.rcParams["font.family"] = "DejaVu Sans"
 
-plt.rcParams.update({
-    "font.size": 8,
-    "axes.labelsize": 9,
-    "axes.titlesize": 9,
-    "xtick.labelsize": 7,
-    "ytick.labelsize": 7,
-    "axes.linewidth": 0.8,
-    "xtick.major.width": 0.6,
-    "ytick.major.width": 0.6,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "figure.dpi": 300,
-    "savefig.dpi": 300,
-    "savefig.bbox": "tight",
-    "savefig.pad_inches": 0.05,
-})
+plt.rcParams.update(
+    {
+        "font.size": 8,
+        "axes.labelsize": 9,
+        "axes.titlesize": 9,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        "axes.linewidth": 0.8,
+        "xtick.major.width": 0.6,
+        "ytick.major.width": 0.6,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.05,
+    }
+)
 
 
 # ── Colors (saturated, distinct, cool→warm) ──
 COLORS = {
-    "Before":  "#5AADBB",   # teal — cool baseline
-    "Elastix": "#F5D06E",   # warm gold — mid-tier
-    "HiMReg":  "#E05B4B",   # coral red — protagonist
+    "Before": "#5AADBB",  # teal — cool baseline
+    "Elastix": "#F5D06E",  # warm gold — mid-tier
+    "HiMReg": "#E05B4B",  # coral red — protagonist
 }
 METHOD_ORDER = ["Before", "Elastix", "HiMReg"]
 
 # Metric metadata: (csv_key, display_name_with_arrow, higher_is_better)
 METRICS = [
-    ("MI",         "MI \u2191",         True),
-    ("NMI",        "NMI \u2191",        True),
-    ("GradNCC",    "GradNCC \u2191",    True),
-    ("GradSSIM",   "GradSSIM \u2191",   True),
+    ("MI", "MI \u2191", True),
+    ("NMI", "NMI \u2191", True),
+    ("GradNCC", "GradNCC \u2191", True),
+    ("GradSSIM", "GradSSIM \u2191", True),
     ("TissueDice", "TissueDice \u2191", True),
-    ("TissueIoU",  "TissueIoU \u2191",  True),
-    ("HD95",       "HD95 \u2193",       False),
-    ("ASSD",       "ASSD \u2193",       False),
+    ("TissueIoU", "TissueIoU \u2191", True),
+    ("HD95", "HD95 \u2193", False),
+    ("ASSD", "ASSD \u2193", False),
 ]
 
 
 # ── Image helpers ──
+
 
 def robust_normalize(image: np.ndarray, p_low: float = 1.0, p_high: float = 99.0) -> np.ndarray:
     arr = np.asarray(image, dtype=np.float32)
@@ -131,6 +128,7 @@ def save_image_no_border(arr: np.ndarray, path: Path, cmap: str | None = None) -
 
 # ── Overlay PNGs ──
 
+
 def generate_overlay_pngs(results_dir: Path, roi_ids: List[str]) -> None:
     if tifffile is None:
         print("[WARN] tifffile not installed, skipping overlay PNGs")
@@ -173,6 +171,7 @@ def generate_overlay_pngs(results_dir: Path, roi_ids: List[str]) -> None:
 
 # ── Metrics CSV ──
 
+
 def load_metrics(results_dir: Path) -> List[Dict]:
     csv_path = results_dir / "metrics_all_cases.csv"
     with open(csv_path, newline="", encoding="utf-8") as f:
@@ -185,6 +184,7 @@ def load_metrics(results_dir: Path) -> List[Dict]:
 
 
 # ── Metrics SVG ──
+
 
 def generate_metrics_svg(results_dir: Path, rows: List[Dict]) -> None:
     import seaborn as sns
@@ -200,10 +200,7 @@ def generate_metrics_svg(results_dir: Path, rows: List[Dict]) -> None:
         means, stds, colors, scatter_vals, labels = [], [], [], [], []
 
         for method in methods:
-            vals = np.array(
-                [float(r[key]) for r in rows if r["method"] == method],
-                dtype=np.float64,
-            )
+            vals = np.array([float(r[key]) for r in rows if r["method"] == method], dtype=np.float64)
             vals = vals[np.isfinite(vals)]
             if vals.size == 0:
                 continue
@@ -216,10 +213,16 @@ def generate_metrics_svg(results_dir: Path, rows: List[Dict]) -> None:
         x = np.arange(len(means))
 
         bars = ax.bar(
-            x, means, yerr=stds,
-            capsize=3, color=colors, alpha=0.75,
+            x,
+            means,
+            yerr=stds,
+            capsize=3,
+            color=colors,
+            alpha=0.75,
             edgecolor=[_darken(c, 0.7) for c in colors],
-            linewidth=0.5, width=0.65, zorder=2,
+            linewidth=0.5,
+            width=0.65,
+            zorder=2,
             error_kw={"elinewidth": 0.8, "capthick": 0.8, "color": "black"},
         )
 
@@ -230,18 +233,19 @@ def generate_metrics_svg(results_dir: Path, rows: List[Dict]) -> None:
 
         for xi, vals, c in zip(x, scatter_vals, colors):
             jitter = rng.uniform(-0.12, 0.12, size=len(vals))
-            ax.scatter(
-                xi + jitter, vals,
-                marker="D", s=20, c=c,
-                edgecolors="none",
-                alpha=0.75, zorder=4,
-            )
+            ax.scatter(xi + jitter, vals, marker="D", s=20, c=c, edgecolors="none", alpha=0.75, zorder=4)
 
         for xi, mean_val in zip(x, means):
             ax.text(
-                xi, mean_val * 0.02, f"{mean_val:.3f}" if mean_val < 10 else f"{mean_val:.1f}",
-                ha="center", va="bottom", fontsize=5.5,
-                color="#333333", fontweight="medium", zorder=5,
+                xi,
+                mean_val * 0.02,
+                f"{mean_val:.3f}" if mean_val < 10 else f"{mean_val:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=5.5,
+                color="#333333",
+                fontweight="medium",
+                zorder=5,
             )
 
         ax.set_xticks(x)
@@ -264,6 +268,7 @@ def generate_metrics_svg(results_dir: Path, rows: List[Dict]) -> None:
 
 # ── Legend SVG (one row, standalone) ──
 
+
 def generate_legend_svg(results_dir: Path) -> None:
     """Generate a standalone one-row legend SVG matching the metrics chart style."""
     methods = METHOD_ORDER
@@ -276,10 +281,7 @@ def generate_legend_svg(results_dir: Path) -> None:
     handles = []
     for method, color in zip(methods, colors):
         bar = ax.bar(
-            [0], [0],
-            color=color, alpha=0.75,
-            edgecolor=_darken(color, 0.7), linewidth=0.5,
-            label=method,
+            [0], [0], color=color, alpha=0.75, edgecolor=_darken(color, 0.7), linewidth=0.5, label=method
         )
         handles.append(bar)
 
@@ -313,7 +315,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate publication figures from benchmark results")
     parser.add_argument("--results-dir", type=str, required=True, help="Path to benchmark output directory")
     parser.add_argument("--roi-ids", type=str, default="roi2,roi3,roi4,roi5", help="Comma-separated ROI ids")
-    parser.add_argument("--skip-overlays", action="store_true", help="Skip overlay PNG generation (when .tif files are missing)")
+    parser.add_argument(
+        "--skip-overlays",
+        action="store_true",
+        help="Skip overlay PNG generation (when .tif files are missing)",
+    )
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)

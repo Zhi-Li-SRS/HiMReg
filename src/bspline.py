@@ -1,13 +1,11 @@
 """B-Spline nonlinear registration module.
-
-Mirrors the default 'nl' parameter set from WSiReg:
-  - 10-level multi-resolution image pyramid (RecursiveImagePyramid)
-  - FinalGridSpacingInPhysicalUnits = 100
-  - GridSpacingSchedule  [512, 392, 256, 128, 64, 32, 16, 4, 2, 1]
-  - MaximumStepLength    [100, 90, 70, 50, 40, 30, 20, 10, 1, 1]
-  - AdaptiveStochasticGradientDescent
-  - AdvancedMattesMutualInformation, 32 bins, 50 000 random samples
-  - No explicit bending-energy penalty
+- 10-level multi-resolution image pyramid (RecursiveImagePyramid)
+- FinalGridSpacingInPhysicalUnits = 100
+- GridSpacingSchedule  [512, 392, 256, 128, 64, 32, 16, 4, 2, 1]
+- MaximumStepLength    [100, 90, 70, 50, 40, 30, 20, 10, 1, 1]
+- AdaptiveStochasticGradientDescent
+- AdvancedMattesMutualInformation, 32 bins, 50 000 random samples
+- No explicit bending-energy penalty
 """
 
 from collections import deque
@@ -27,6 +25,7 @@ from src.utils import downsample
 
 # ───────────────────────── BSplineTransform ─────────────────────────
 
+
 class BSplineTransform(nn.Module):
     """B-spline FFD parameterised by a control-point grid.
 
@@ -35,8 +34,7 @@ class BSplineTransform(nn.Module):
     basis function evaluation (C2-smooth, approximating — matching Elastix).
     """
 
-    def __init__(self, image_h: int, image_w: int, grid_spacing: int,
-                 device: torch.device):
+    def __init__(self, image_h: int, image_w: int, grid_spacing: int, device: torch.device):
         super().__init__()
         self.image_h = image_h
         self.image_w = image_w
@@ -45,16 +43,14 @@ class BSplineTransform(nn.Module):
         grid_h = image_h // grid_spacing + 3
         grid_w = image_w // grid_spacing + 3
 
-        self.control_points = nn.Parameter(
-            torch.zeros(1, 2, grid_h, grid_w, device=device)
-        )
+        self.control_points = nn.Parameter(torch.zeros(1, 2, grid_h, grid_w, device=device))
 
         # Pre-compute pixel → control-point-space mappings (rebuilt on refine).
         self._build_index_cache(image_h, image_w, grid_spacing, grid_h, grid_w, device)
 
-    def _build_index_cache(self, image_h: int, image_w: int,
-                           grid_spacing: int, grid_h: int, grid_w: int,
-                           device: torch.device) -> None:
+    def _build_index_cache(
+        self, image_h: int, image_w: int, grid_spacing: int, grid_h: int, grid_w: int, device: torch.device
+    ) -> None:
         """Pre-compute integer indices and B-spline weights for all pixels."""
         # Map pixel coords to control-point space (+1 for padding cell).
         uy = torch.arange(image_h, device=device, dtype=torch.float32) / grid_spacing + 1.0
@@ -70,18 +66,24 @@ class BSplineTransform(nn.Module):
         wx = self._bspline_weights(tx)  # [4, W]
 
         # Control point indices for the 4×4 support: [4, H] / [4, W]
-        cy = torch.stack([
-            (iy - 1).clamp(0, grid_h - 1),
-            iy.clamp(0, grid_h - 1),
-            (iy + 1).clamp(0, grid_h - 1),
-            (iy + 2).clamp(0, grid_h - 1),
-        ], dim=0)
-        cx = torch.stack([
-            (ix - 1).clamp(0, grid_w - 1),
-            ix.clamp(0, grid_w - 1),
-            (ix + 1).clamp(0, grid_w - 1),
-            (ix + 2).clamp(0, grid_w - 1),
-        ], dim=0)
+        cy = torch.stack(
+            [
+                (iy - 1).clamp(0, grid_h - 1),
+                iy.clamp(0, grid_h - 1),
+                (iy + 1).clamp(0, grid_h - 1),
+                (iy + 2).clamp(0, grid_h - 1),
+            ],
+            dim=0,
+        )
+        cx = torch.stack(
+            [
+                (ix - 1).clamp(0, grid_w - 1),
+                ix.clamp(0, grid_w - 1),
+                (ix + 1).clamp(0, grid_w - 1),
+                (ix + 2).clamp(0, grid_w - 1),
+            ],
+            dim=0,
+        )
 
         # Register as buffers (non-parameter, move with .to(device)).
         self.register_buffer("_wy", wy)
@@ -136,10 +138,7 @@ class BSplineTransform(nn.Module):
 
         with torch.no_grad():
             upsampled = F.interpolate(
-                self.control_points.data,
-                size=(new_grid_h, new_grid_w),
-                mode="bicubic",
-                align_corners=True,
+                self.control_points.data, size=(new_grid_h, new_grid_w), mode="bicubic", align_corners=True
             )
             # Scale displacements: normalised-coord space changes with
             # image resolution.  channel 0 = x  ↔ width,  channel 1 = y ↔ height.
@@ -160,6 +159,7 @@ class BSplineTransform(nn.Module):
 
 # ───────────────────── BSplineBendingEnergy (optional) ──────────────
 
+
 class BSplineBendingEnergy(nn.Module):
     """Second-derivative penalty for a displacement field (optional)."""
 
@@ -171,16 +171,14 @@ class BSplineBendingEnergy(nn.Module):
         d2_xy = dx[:, :, 1:, :] - dx[:, :, :-1, :]
         h = min(d2_xx.shape[2], d2_yy.shape[2], d2_xy.shape[2])
         w = min(d2_xx.shape[3], d2_yy.shape[3], d2_xy.shape[3])
-        return (d2_xx[:, :, :h, :w] ** 2
-                + d2_yy[:, :, :h, :w] ** 2
-                + 2 * d2_xy[:, :, :h, :w] ** 2).mean()
+        return (d2_xx[:, :, :h, :w] ** 2 + d2_yy[:, :, :h, :w] ** 2 + 2 * d2_xy[:, :, :h, :w] ** 2).mean()
 
 
 # ──────────────────── BSplineRegistration (WSiReg-style) ────────────
 
 # WSiReg 'nl' defaults -------------------------------------------------
 _DEFAULT_GRID_SCHEDULE = [512, 392, 256, 128, 64, 32, 16, 4, 2, 1]
-_DEFAULT_MAX_STEPS     = [100., 90., 70., 50., 40., 30., 20., 10., 1., 1.]
+_DEFAULT_MAX_STEPS = [100.0, 90.0, 70.0, 50.0, 40.0, 30.0, 20.0, 10.0, 1.0, 1.0]
 
 
 class BSplineRegistration:
@@ -297,7 +295,7 @@ class BSplineRegistration:
         x = np.arange(len(self._losses))
         y = np.array(self._losses)
         n = len(self._losses)
-        denom = n * (x ** 2).sum() - x.sum() ** 2
+        denom = n * (x**2).sum() - x.sum() ** 2
         if denom == 0:
             return 0.0
         return float((n * np.dot(x, y) - x.sum() * y.sum()) / denom)
@@ -336,25 +334,16 @@ class BSplineRegistration:
         return 2 ** max(num_resolutions - 1 - level, 0)
 
     def _prepare_images(
-        self,
-        arrays: torch.Tensor,
-        image_obj: Image,
-        size_down: List[int],
-        ds_factor: int,
+        self, arrays: torch.Tensor, image_obj: Image, size_down: List[int], ds_factor: int
     ) -> torch.Tensor:
         """Gaussian-blur + downsample to *size_down*."""
         if ds_factor > 1:
             sigmas = 0.5 * torch.tensor(
-                [s / sd for s, sd in zip(arrays.shape[2:], size_down)],
-                device=self.device,
+                [s / sd for s, sd in zip(arrays.shape[2:], size_down)], device=self.device
             )
-            return downsample(
-                arrays, size=size_down,
-                mode=image_obj.interpolate_mode, sigma=sigmas,
-            )
+            return downsample(arrays, size=size_down, mode=image_obj.interpolate_mode, sigma=sigmas)
         return F.interpolate(
-            arrays, size=size_down,
-            mode=image_obj.interpolate_mode, align_corners=self.align_corners,
+            arrays, size=size_down, mode=image_obj.interpolate_mode, align_corners=self.align_corners
         )
 
     # ─── main optimisation loop ───
@@ -365,9 +354,7 @@ class BSplineRegistration:
         fixed_t2p = self.fixed_images.get_pixel_to_physical()
         moving_p2t = self.moving_images.get_physical_to_pixel()
         full_h, full_w = fixed_arrays.shape[2:]
-        affine_map = torch.matmul(
-            moving_p2t, torch.matmul(self.affine, fixed_t2p)
-        )[:, :-1]
+        affine_map = torch.matmul(moving_p2t, torch.matmul(self.affine, fixed_t2p))[:, :-1]
 
         transformed_images = [] if save_transformed else None
         transform: Optional[BSplineTransform] = None
@@ -392,13 +379,11 @@ class BSplineRegistration:
                 continue
 
             # 3. Downsample images ---------------------------------------------
-            fixed_down = self._prepare_images(
-                fixed_arrays, self.fixed_images, [h_down, w_down], ds,
-            )
+            fixed_down = self._prepare_images(fixed_arrays, self.fixed_images, [h_down, w_down], ds)
             moving_down = self._prepare_images(
-                moving_arrays, self.moving_images,
-                [max(moving_arrays.shape[2] // ds, 4),
-                 max(moving_arrays.shape[3] // ds, 4)],
+                moving_arrays,
+                self.moving_images,
+                [max(moving_arrays.shape[2] // ds, 4), max(moving_arrays.shape[3] // ds, 4)],
                 ds,
             )
 
@@ -410,14 +395,11 @@ class BSplineRegistration:
 
             # 5. ASGD optimiser (auto-estimated `a`, reset per level) ----------
             optimizer = AdaptiveStochasticGradientDescent(
-                [transform.control_points],
-                a=None, alpha=1.0, max_iter=self.max_iterations,
+                [transform.control_points], a=None, alpha=1.0, max_iter=self.max_iterations
             )
 
             # 6. Affine grid at this resolution --------------------------------
-            affine_coords = F.affine_grid(
-                affine_map, fixed_down.shape, align_corners=self.align_corners,
-            )
+            affine_coords = F.affine_grid(affine_map, fixed_down.shape, align_corners=self.align_corners)
 
             # MaximumStepLength in normalised [-1, 1] coords.
             max_step_norm = self.max_step_lengths[level] * 2.0 / max(full_h, full_w)
@@ -428,20 +410,14 @@ class BSplineRegistration:
             for i in pbar:
                 optimizer.zero_grad()
 
-                disp = transform()                       # [1, H, W, 2]
+                disp = transform()  # [1, H, W, 2]
                 coords = affine_coords + disp
-                moved = F.grid_sample(
-                    moving_down, coords,
-                    mode="bilinear", align_corners=self.align_corners,
-                )
+                moved = F.grid_sample(moving_down, coords, mode="bilinear", align_corners=self.align_corners)
 
                 loss = self._sampled_mi(moved, fixed_down)
 
                 moved_valid = F.grid_sample(
-                    torch.ones_like(moving_down),
-                    coords,
-                    mode="nearest",
-                    align_corners=self.align_corners,
+                    torch.ones_like(moving_down), coords, mode="nearest", align_corners=self.align_corners
                 )
                 valid_ratio = float(moved_valid.mean().item())
 
@@ -460,9 +436,10 @@ class BSplineRegistration:
                     weight = float(self.oob_penalty_weight)
                     if self.oob_penalty_adaptive and self.required_valid_ratio > 0.0:
                         overlap_scale = max(
-                            (self.required_valid_ratio - valid_ratio) / max(self.required_valid_ratio, 1e-12), 0.0
+                            (self.required_valid_ratio - valid_ratio) / max(self.required_valid_ratio, 1e-12),
+                            0.0,
                         )
-                        weight *= (1.0 + 4.0 * overlap_scale)
+                        weight *= 1.0 + 4.0 * overlap_scale
                     loss = loss + (weight * penalty)
 
                 if self.bending_energy_fn is not None:
@@ -473,9 +450,7 @@ class BSplineRegistration:
                 loss_val = loss.item()
                 if not np.isfinite(loss_val):
                     optimizer.zero_grad()
-                    pbar.set_description(
-                        f"bspline L{level} gs={gs_full} NaN (skip)"
-                    )
+                    pbar.set_description(f"bspline L{level} gs={gs_full} NaN (skip)")
                     continue
 
                 # --- apply MaximumStepLength clamp ---
@@ -486,15 +461,9 @@ class BSplineRegistration:
                     delta.clamp_(-max_step_norm, max_step_norm)
                     transform.control_points.data = old_cp + delta
 
-                pbar.set_description(
-                    f"bspline L{level} gs={gs_full} cp={n_cp} "
-                    f"loss={loss_val:.4f}"
-                )
+                pbar.set_description(f"bspline L{level} gs={gs_full} cp={n_cp} " f"loss={loss_val:.4f}")
                 if self._converged(loss_val):
-                    print(
-                        f"  B-spline converged at level {level} "
-                        f"(gs_full={gs_full}) after {i+1} iters"
-                    )
+                    print(f"  B-spline converged at level {level} " f"(gs_full={gs_full}) after {i+1} iters")
                     break
 
             # Cache final coordinates at this level.
@@ -504,8 +473,7 @@ class BSplineRegistration:
             if save_transformed:
                 with torch.no_grad():
                     out = F.grid_sample(
-                        moving_down, self.final_coordinates,
-                        mode="bilinear", align_corners=self.align_corners,
+                        moving_down, self.final_coordinates, mode="bilinear", align_corners=self.align_corners
                     )
                 transformed_images.append(out.cpu())
 
@@ -521,7 +489,4 @@ class BSplineRegistration:
     def apply_transform(self, moving_image: torch.Tensor) -> torch.Tensor:
         if self.final_coordinates is None:
             raise RuntimeError("Run optimize() first.")
-        return F.grid_sample(
-            moving_image, self.final_coordinates,
-            mode="bilinear", align_corners=True,
-        )
+        return F.grid_sample(moving_image, self.final_coordinates, mode="bilinear", align_corners=True)
