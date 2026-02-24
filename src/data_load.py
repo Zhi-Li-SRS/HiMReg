@@ -3,6 +3,7 @@ import SimpleITK as sitk
 import tifffile
 import torch
 
+from src.preprocess import build_registration_view
 from src.utils import integer_to_onehot
 
 
@@ -23,6 +24,7 @@ class Image:
         self,
         image_data,
         device,
+        preprocessing=None,
         is_segmentation=False,
         max_seg_label=None,
         background_seg_label=0,
@@ -37,6 +39,7 @@ class Image:
                 self._load_single_image(
                     img,
                     device,
+                    preprocessing,
                     is_segmentation,
                     max_seg_label,
                     background_seg_label,
@@ -53,6 +56,7 @@ class Image:
                 self._load_single_image(
                     image_data,
                     device,
+                    preprocessing,
                     is_segmentation,
                     max_seg_label,
                     background_seg_label,
@@ -71,6 +75,7 @@ class Image:
         self,
         image_data,
         device,
+        preprocessing,
         is_segmentation,
         max_seg_label,
         background_seg_label,
@@ -82,6 +87,7 @@ class Image:
         image = SingleImage(
             image_data,
             device,
+            preprocessing,
             is_segmentation,
             max_seg_label,
             background_seg_label,
@@ -164,6 +170,7 @@ class SingleImage:
         self,
         image_data,
         device,
+        preprocessing=None,
         is_segmentation=False,
         max_seg_label=None,
         background_seg_label=0,
@@ -172,7 +179,11 @@ class SingleImage:
         direction=None,
         origin=None,
     ) -> None:
-        self._device = device  # Change to protected attribute
+        self._device = device
+        self.preprocessing = dict(preprocessing or {})
+        self._source_spacing = None
+        self._source_origin = None
+        self._source_direction = None
         if isinstance(image_data, str):
             self.load_from_file(image_data)
         elif isinstance(image_data, sitk.Image):
@@ -184,11 +195,10 @@ class SingleImage:
         else:
             raise ValueError("Unsupported image_data type")
 
-        self.set_dims()  # set the number of dimensions of the image
+        self.preprocess(is_segmentation=is_segmentation)
+        self.set_dims()
 
         assert self.dims in [2, 3], "Only 2D and 3D images are currently supported"
-
-        self.preprocess()
 
         if is_segmentation:
             self._init_segmentation(max_seg_label, background_seg_label, seg_preprocessor)
@@ -201,10 +211,8 @@ class SingleImage:
         """Load an image from a file."""
         if file_path.lower().endswith(".tif") or file_path.lower().endswith(".tiff"):
             self.array = tifffile.imread(file_path)
-            if self.array.dtype == np.uint16:
-                self.array = self.array.astype(np.float32)
-            self.array = torch.from_numpy(self.array).to(self.device).float()
-            self.itk_image = sitk.GetImageFromArray(self.array.cpu().numpy())
+            self.array = torch.from_numpy(np.asarray(self.array)).to(self.device).float()
+            self.itk_image = sitk.GetImageFromArray(self.array.detach().cpu().numpy())
         else:
             itk_image = sitk.ReadImage(file_path)
             self.load_from_sitk(itk_image)
@@ -212,20 +220,20 @@ class SingleImage:
     def load_from_sitk(self, itk_image: sitk.Image):
         """Load an image from a SimpleITK image."""
         self.itk_image = itk_image
-        self.dims = self.itk_image.GetDimension()
+        self._source_spacing = tuple(self.itk_image.GetSpacing())
+        self._source_origin = tuple(self.itk_image.GetOrigin())
+        self._source_direction = tuple(self.itk_image.GetDirection())
         self.array = torch.from_numpy(sitk.GetArrayFromImage(self.itk_image)).to(self.device).float()
 
     def load_from_numpy(self, np_array: np.ndarray):
         """Load an image from a numpy array."""
-        self.array = torch.from_numpy(np_array).to(self.device).float()
-        self.dims = self.array.ndim
-        self.itk_image = sitk.GetImageFromArray(np_array)
+        self.array = torch.from_numpy(np.asarray(np_array)).to(self.device).float()
+        self.itk_image = sitk.GetImageFromArray(np.asarray(np_array))
 
     def load_from_torch(self, torch_tensor: torch.Tensor):
         """Load an image from a torch tensor."""
         self.array = torch_tensor.to(self.device).float()
-        self.dims = self.array.ndim - 2
-        self.itk_image = sitk.GetImageFromArray(self.array.cpu().numpy())
+        self.itk_image = sitk.GetImageFromArray(self.array.detach().cpu().numpy())
 
     def set_dims(self):
         if self.array.ndim == 2:
@@ -237,19 +245,65 @@ class SingleImage:
         else:
             raise ValueError(f"Unsupported number of dimensions: {self.array.ndim}")
 
-    def preprocess(self):
+    def preprocess(self, is_segmentation=False):
         self.array = torch.nan_to_num(self.array, nan=0.0, posinf=1.0, neginf=0.0)
+
+        if is_segmentation:
+            return
+
+        array_np = self.array.detach().cpu().numpy()
+        array_np = build_registration_view(array_np, self.preprocessing)
+
+        self.array = torch.from_numpy(array_np).to(self.device).float()
+        self.itk_image = sitk.GetImageFromArray(array_np.astype(np.float32))
+        self._copy_source_metadata_if_compatible()
+
+    def _copy_source_metadata_if_compatible(self):
+        if self._source_spacing is None or self._source_origin is None:
+            return
+
+        if self.array.ndim == 2:
+            spacing = tuple(self._source_spacing[:2])
+            origin = tuple(self._source_origin[:2])
+            direction = self._extract_2d_direction(self._source_direction)
+            self.itk_image.SetSpacing(spacing)
+            self.itk_image.SetOrigin(origin)
+            self.itk_image.SetDirection(direction)
+        elif self.array.ndim == 3 and len(self._source_spacing) >= 3 and len(self._source_origin) >= 3:
+            self.itk_image.SetSpacing(tuple(self._source_spacing[:3]))
+            self.itk_image.SetOrigin(tuple(self._source_origin[:3]))
+            if self._source_direction is not None and len(self._source_direction) >= 9:
+                self.itk_image.SetDirection(tuple(self._source_direction[:9]))
+
+    @staticmethod
+    def _extract_2d_direction(direction):
+        if direction is None:
+            return (1.0, 0.0, 0.0, 1.0)
+        direction = tuple(direction)
+        if len(direction) == 4:
+            return direction
+        if len(direction) >= 9:
+            return (direction[0], direction[1], direction[3], direction[4])
+        return (1.0, 0.0, 0.0, 1.0)
 
     def _init_regular_image(self):
         """Initialize a regular image."""
-        self.array = self.array.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
-        self.channels = 1
-        assert self.channels == 1, "Only single channel images are currently supported"
+        if self.array.ndim == 2:
+            self.array = self.array.unsqueeze(0).unsqueeze(0)
+            self.channels = 1
+        elif self.array.ndim == 3:
+            self.array = self.array.unsqueeze(0).unsqueeze(0)
+            self.channels = 1
+        elif self.array.ndim == 4:
+            self.channels = self.array.shape[1]
+        else:
+            raise ValueError(f"Unexpected tensor rank for regular image: {self.array.shape}")
 
     def _init_segmentation(self, max_seg_label, background_seg_label, seg_preprocessor):
         """Initialize a segmentation mask."""
         array = torch.from_numpy(sitk.GetArrayFromImage(self.itk_image).astype(int)).to(self.device).long()
-        array = seg_preprocessor(array)
+        if seg_preprocessor is not None:
+            array = seg_preprocessor(array)
         if max_seg_label is not None:
             array[array > max_seg_label] = background_seg_label
         array = integer_to_onehot(
@@ -261,32 +315,28 @@ class SingleImage:
     def _init_transformations(self, spacing, direction, origin):
         """Initialize the transformation matrices."""
         try:
+            dims = self.dims
             spacing = (
                 np.array(self.itk_image.GetSpacing())[None] if spacing is None else np.array(spacing)[None]
             )
             origin = np.array(self.itk_image.GetOrigin())[None] if origin is None else np.array(origin)[None]
             direction = (
-                np.array(self.itk_image.GetDirection()).reshape(self.dims, self.dims)
+                np.array(self.itk_image.GetDirection()).reshape(dims, dims)
                 if direction is None
-                else np.array(direction).reshape(self.dims, self.dims)
+                else np.array(direction).reshape(dims, dims)
             )
 
-            pixel_to_physical = np.eye(self.dims + 1)
-            pixel_to_physical[: self.dims, -1] = origin
-            pixel_to_physical[: self.dims, : self.dims] = direction * spacing
+            pixel_to_physical = np.eye(dims + 1)
+            pixel_to_physical[:dims, -1] = origin
+            pixel_to_physical[:dims, :dims] = direction * spacing
 
-            physical_to_pixel = np.eye(self.dims + 1)
+            physical_to_pixel = np.eye(dims + 1)
             scaleterm = (np.array(self.itk_image.GetSize()) - 1) * 0.5
-            physical_to_pixel[: self.dims, : self.dims] = np.diag(scaleterm)
-            physical_to_pixel[: self.dims, -1] = scaleterm
+            physical_to_pixel[:dims, :dims] = np.diag(scaleterm)
+            physical_to_pixel[:dims, -1] = scaleterm
 
-            # Convert to torch tensors on CPU first
             pixel_to_physical = torch.from_numpy(np.matmul(pixel_to_physical, physical_to_pixel)).float()
-
-            # Calculate inverse on CPU
             physical_to_pixel = torch.inverse(pixel_to_physical)
-
-            # Move to device and add batch dimension
             self.pixel_to_physical = pixel_to_physical.to(self.device).unsqueeze(0)
             self.physical_to_pixel = physical_to_pixel.to(self.device).unsqueeze(0)
 

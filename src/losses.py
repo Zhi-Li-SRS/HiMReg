@@ -41,7 +41,24 @@ class MutualInformation(nn.Module):
         )  # Calculate sigma for Gaussian kernel
 
         self.preterm = 1 / (2 * sigma**2)  # Preterm for Gaussian kernel
+        self.sigma_ratio = sigma_ratio
         self.register_buffer("bin_centers", bin_centers[None, None, ...])  # (1, 1, num_bins)
+
+    def set_num_bins(self, num_bins: int) -> None:
+        """Reconfigure the number of histogram bins at runtime.
+
+        Recomputes bin_centers and preterm buffers in-place so that the same
+        MI instance can be reused across registration stages that prefer
+        different bin counts (e.g. 16 for rigid, 32 for affine).
+        """
+        if num_bins <= 0:
+            raise ValueError(f"num_bins must > 0, got {num_bins}")
+        self.num_bins = num_bins
+        bin_centers = torch.linspace(0.0, 1.0, num_bins)
+        sigma = torch.mean(bin_centers[1:] - bin_centers[:-1]) * self.sigma_ratio
+        self.preterm = 1 / (2 * sigma**2)
+        device = self.bin_centers.device
+        self.bin_centers = bin_centers[None, None, ...].to(device)
 
     def estimate_prob_distribution(self, img):
         """
@@ -114,7 +131,21 @@ class MutualInformation(nn.Module):
         probability = torch.mean(weight, dim=-2, keepdim=True)  # (batch, 1, num_bin)
         return weight, probability
 
-    def forward(self, pred, target):
+    def _prepare_mask(self, mask: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        if mask is None:
+            return None
+        if mask.shape != reference.shape:
+            raise ValueError(f"Mask shape {mask.shape} differs from reference shape {reference.shape}")
+        mask = torch.clamp(mask.float(), min=0.0)
+        mask = mask.reshape(mask.shape[0], -1)
+        mask_sum = mask.sum(dim=1, keepdim=True)
+        valid = mask_sum > 0
+        if not torch.all(valid):
+            mask = torch.where(valid, mask, torch.ones_like(mask))
+            mask_sum = mask.sum(dim=1, keepdim=True)
+        return mask / (mask_sum + 1e-8)
+
+    def forward(self, pred, target, mask=None):
         """
         Compute the mutual information between pred and target (fixed) image)
 
@@ -129,8 +160,16 @@ class MutualInformation(nn.Module):
         pred_weight, pred_prob = self.estimate_prob_distribution(pred)
         target_weight, target_prob = self.estimate_prob_distribution(target)
 
-        joint_prob = torch.bmm(pred_weight.permute(0, 2, 1), target_weight) / pred_weight.shape[1]
-        prod_prob = torch.bmm(pred_prob.permute(0, 2, 1), target_prob)
+        prepared_mask = self._prepare_mask(mask, pred)
+        if prepared_mask is None:
+            joint_prob = torch.bmm(pred_weight.permute(0, 2, 1), target_weight) / pred_weight.shape[1]
+            prod_prob = torch.bmm(pred_prob.permute(0, 2, 1), target_prob)
+        else:
+            prepared_mask = prepared_mask.unsqueeze(-1)
+            pred_prob = torch.sum(pred_weight * prepared_mask, dim=1, keepdim=True)
+            target_prob = torch.sum(target_weight * prepared_mask, dim=1, keepdim=True)
+            joint_prob = torch.bmm((pred_weight * prepared_mask).permute(0, 2, 1), target_weight)
+            prod_prob = torch.bmm(pred_prob.permute(0, 2, 1), target_prob)
 
         mi = torch.sum(
             joint_prob

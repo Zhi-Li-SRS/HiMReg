@@ -10,7 +10,8 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 from src.losses import LNCC, MutualInformation
-from src.utils import *  
+from src.preprocess import compute_tissue_mask, torch_gradient_magnitude
+from src.utils import *
 
 
 class DiffRegistration:
@@ -62,6 +63,11 @@ class DiffRegistration:
         blur=True,
         align_corners=True,
         loss_device=None,
+        mi_num_samples: Optional[int] = None,
+        gradcc_sigma: float = 1.0,
+        loss_weights: Optional[dict] = None,
+        mask_weighted_loss: bool = False,
+        regularization_weight: float = 0.05,
     ):
         # Validate inputs
         self.validate_inputs(scales, iterations)
@@ -77,6 +83,11 @@ class DiffRegistration:
         self.blur = blur
         self.align_corners = align_corners
         self.loss_device = loss_device
+        self.mi_num_samples = int(mi_num_samples) if mi_num_samples is not None else None
+        self.gradcc_sigma = gradcc_sigma
+        self.loss_weights = loss_weights if loss_weights is not None else {"mi": 1.0, "gradcc": 0.25}
+        self.mask_weighted_loss = bool(mask_weighted_loss)
+        self.regularization_weight = float(regularization_weight)
 
         # Convergence params
         self.tolerance = tolerance
@@ -100,8 +111,9 @@ class DiffRegistration:
 
         # Initialize affine transformation
         self._init_affine(init_affine)
-        self.smooth_warp_sigma = 0  # Reset after initialization
+        self.smooth_warp_sigma = smooth_warp_sigma
         self.final_coordinates = None
+        self.loss_type = loss_type
 
     def validate_inputs(self, scales, iterations):
         """Validate input parameters."""
@@ -116,6 +128,14 @@ class DiffRegistration:
             self.loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
         elif loss_type == "cc":
             self.loss_fn = LNCC(
+                kernel_type=cc_kernel_type,
+                spatial_dims=self.dims,
+                kernel_size=cc_kernel_size,
+                **loss_params,
+            )
+        elif loss_type == "mi_gradcc":
+            self.mi_loss_fn = MutualInformation(kernel_type=mi_kernel_type, **loss_params)
+            self.gradcc_loss_fn = LNCC(
                 kernel_type=cc_kernel_type,
                 spatial_dims=self.dims,
                 kernel_size=cc_kernel_size,
@@ -188,8 +208,10 @@ class DiffRegistration:
 
     def compute_regularization_loss(self, warp_field: torch.Tensor):
         """Compute regularization loss."""
-        grad = torch.gradient(warp_field, dim=(1, 2, 3))
-        grad_norm = sum(torch.sum(g**2) for g in grad)
+        # warp_field is [..., dims]; regularize spatial smoothness only (exclude vector dim).
+        spatial_dims = tuple(range(1, warp_field.ndim - 1))
+        grad = torch.gradient(warp_field, dim=spatial_dims)
+        grad_norm = sum((g * g).mean() for g in grad)
         return grad_norm
 
     def optimize(self, save_transformed=False):
@@ -213,6 +235,22 @@ class DiffRegistration:
 
         transformed_images = [] if save_transformed else None
         warp_gaussian = self.get_warp_gaussian()
+        fixed_mask_full = None
+        moving_mask_full = None
+        if self.mask_weighted_loss:
+            fixed_np = fixed_arrays.detach().cpu().numpy()
+            masks = []
+            for batch_idx in range(fixed_np.shape[0]):
+                mask = compute_tissue_mask(np.asarray(fixed_np[batch_idx, 0], dtype=np.float32), min_area=128)
+                masks.append(mask)
+            fixed_mask_full = torch.from_numpy(np.stack(masks, axis=0)).to(self.device).float().unsqueeze(1)
+
+            moving_np = moving_arrays.detach().cpu().numpy()
+            masks = []
+            for batch_idx in range(moving_np.shape[0]):
+                mask = compute_tissue_mask(np.asarray(moving_np[batch_idx, 0], dtype=np.float32), min_area=128)
+                masks.append(mask)
+            moving_mask_full = torch.from_numpy(np.stack(masks, axis=0)).to(self.device).float().unsqueeze(1)
 
         # Hierarchical optimization
         for scale, iters in zip(self.scales, self.iterations):
@@ -222,6 +260,14 @@ class DiffRegistration:
             fixed_image_down, moving_image_blur = self.prepare_images_for_scale(
                 fixed_arrays, moving_arrays, size_down, scale
             )
+            if fixed_mask_full is not None:
+                fixed_mask_down = F.interpolate(fixed_mask_full, size=size_down, mode="nearest")
+            else:
+                fixed_mask_down = None
+            if moving_mask_full is not None:
+                moving_mask_down = F.interpolate(moving_mask_full, size=moving_image_blur.shape[2:], mode="nearest")
+            else:
+                moving_mask_down = None
 
             # Setup registration at current scale
             self.warp.update_field_size(size_down)
@@ -248,14 +294,34 @@ class DiffRegistration:
                     align_corners=self.align_corners,
                 )
 
+                moved_mask = None
+                if fixed_mask_down is not None:
+                    moved_valid = F.grid_sample(
+                        torch.ones_like(moving_image_blur),
+                        moved_coords,
+                        mode="nearest",
+                        align_corners=self.align_corners,
+                    )
+                    fixed_valid = fixed_mask_down * moved_valid
+                    if moving_mask_down is not None:
+                        warped_moving_mask = F.grid_sample(
+                            moving_mask_down,
+                            moved_coords,
+                            mode="bilinear",
+                            align_corners=self.align_corners,
+                        )
+                        moved_mask = fixed_valid * torch.clamp(warped_moving_mask, 0.0, 1.0)
+                    else:
+                        moved_mask = fixed_valid
+
                 if self.loss_device is not None:
                     moved_image = moved_image.to(self.loss_device)
                     fixed_image_down = fixed_image_down.to(self.loss_device)
 
                 # Compute loss and optimize
-                sim_loss = self.loss_fn(moved_image, fixed_image_down)
+                sim_loss = self._compute_similarity_loss(moved_image, fixed_image_down, mask=moved_mask)
                 reg_loss = self.compute_regularization_loss(warp_field)
-                loss = sim_loss + 0.05 * reg_loss
+                loss = sim_loss + (self.regularization_weight * reg_loss)
 
                 self.warp.reset_gradients()
                 loss.backward()
@@ -297,19 +363,28 @@ class DiffRegistration:
         scale: int,
     ) -> tuple:
         """Prepare fixed and moving images for current scale."""
+        moving_size_down = [max(int(s / scale), 1) for s in moving_arrays.shape[2:]]
         if self.blur and scale > 1:
-            sigmas = 0.5 * torch.tensor(
+            fixed_sigmas = 0.5 * torch.tensor(
                 [sz / szdown for sz, szdown in zip(fixed_arrays.shape[2:], size_down)],
                 device=self.device,
             )
-            gaussians = [gaussian_1d(s, truncated=2) for s in sigmas]
+            moving_sigmas = 0.5 * torch.tensor(
+                [sz / szdown for sz, szdown in zip(moving_arrays.shape[2:], moving_size_down)],
+                device=self.device,
+            )
             fixed_image_down = downsample(
                 fixed_arrays,
                 size=size_down,
                 mode=self.fixed_images.interpolate_mode,
-                sigma=sigmas,
+                sigma=fixed_sigmas,
             )
-            moving_image_blur = seperate_filter(moving_arrays, gaussians)
+            moving_image_blur = downsample(
+                moving_arrays,
+                size=moving_size_down,
+                mode=self.moving_images.interpolate_mode,
+                sigma=moving_sigmas,
+            )
         else:
             fixed_image_down = F.interpolate(
                 fixed_arrays,
@@ -317,9 +392,77 @@ class DiffRegistration:
                 mode=self.fixed_images.interpolate_mode,
                 align_corners=self.align_corners,
             )
-            moving_image_blur = moving_arrays
+            moving_image_blur = F.interpolate(
+                moving_arrays,
+                size=moving_size_down,
+                mode=self.moving_images.interpolate_mode,
+                align_corners=self.align_corners,
+            )
 
         return fixed_image_down, moving_image_blur
+
+    def _sampled_mi(
+        self,
+        mi_fn,
+        moved_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute MI loss with optional stratified sampling."""
+        if self.mi_num_samples is None or self.mi_num_samples <= 0:
+            return mi_fn(moved_image, fixed_image, mask=mask) if mask is not None else mi_fn(moved_image, fixed_image)
+
+        b = moved_image.shape[0]
+        pred_flat = moved_image.reshape(b, -1)
+        target_flat = fixed_image.reshape(b, -1)
+        n = pred_flat.shape[1]
+        k = min(int(self.mi_num_samples), int(n))
+        if k <= 0:
+            return mi_fn(moved_image, fixed_image, mask=mask) if mask is not None else mi_fn(moved_image, fixed_image)
+
+        if mask is not None:
+            mask_flat = (mask.reshape(b, -1) > 0.05)
+            idx_batches = []
+            for batch_idx in range(b):
+                pos = torch.nonzero(mask_flat[batch_idx], as_tuple=False).squeeze(1)
+                if pos.numel() == 0:
+                    pos = torch.arange(n, device=moved_image.device)
+                if pos.numel() >= k:
+                    perm = torch.randperm(pos.numel(), device=moved_image.device)[:k]
+                    idx_b = pos[perm]
+                else:
+                    idx_b = pos[torch.randint(0, pos.numel(), (k,), device=moved_image.device)]
+                idx_batches.append(idx_b)
+            idx = torch.stack(idx_batches, dim=0)
+        else:
+            stratum_size = n / k
+            offsets = torch.rand(b, k, device=moved_image.device)
+            base = torch.arange(k, device=moved_image.device, dtype=torch.float32).unsqueeze(0)
+            idx = ((base + offsets) * stratum_size).long().clamp(max=n - 1)
+        pred_s = pred_flat.gather(1, idx)
+        target_s = target_flat.gather(1, idx)
+        return mi_fn(pred_s, target_s)
+
+    def _compute_similarity_loss(
+        self,
+        moved_image: torch.Tensor,
+        fixed_image: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        use_mask = mask if self.mask_weighted_loss else None
+        if self.loss_type == "mi_gradcc":
+            w_mi = self.loss_weights.get("mi", 1.0)
+            w_gradcc = self.loss_weights.get("gradcc", 0.25)
+            mi_loss = self._sampled_mi(self.mi_loss_fn, moved_image, fixed_image, mask=use_mask)
+            moved_grad = torch_gradient_magnitude(moved_image, sigma=self.gradcc_sigma)
+            fixed_grad = torch_gradient_magnitude(fixed_image, sigma=self.gradcc_sigma)
+            gradcc_loss = self.gradcc_loss_fn(moved_grad, fixed_grad, mask=use_mask)
+            return w_mi * mi_loss + w_gradcc * gradcc_loss
+
+        if self.loss_type != "mi":
+            return self.loss_fn(moved_image, fixed_image, mask=use_mask) if use_mask is not None else self.loss_fn(moved_image, fixed_image)
+
+        return self._sampled_mi(self.loss_fn, moved_image, fixed_image, mask=use_mask)
 
     def get_final_coordinates(self):
         """Get the final affine coordinates."""

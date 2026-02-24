@@ -1,2 +1,9 @@
 data/
 pred/ 
+.claude
+CLAUDE.md
+AGENTS.md
+__pycache__
+external/
+match_anything_affine.py
+Intensity_distribution/

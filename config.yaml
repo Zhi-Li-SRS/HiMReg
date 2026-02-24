@@ -8,20 +8,77 @@ io:
   moving: "data/maldi/redox_rescale.tif"   # Path to the moving image to be aligned
   output: "pred"                    # Directory where results are written
 
+scale_sync:
+  enabled: true                     # Mandatory: align moving canvas to fixed canvas before registration
+  mode: "isotropic_fit"             # "none" | "isotropic_fit"
+
+preprocessing:
+  fixed:
+    image_type: "BF"
+    invert_bf: true
+    gray_mode: "luma"
+    robust_normalize: true
+    robust_percentiles: [1.0, 99.0]
+  moving:
+    image_type: "FL"
+    robust_normalize: true
+    robust_percentiles: [1.0, 99.0]
+
 affine:
-  scales: [6, 4, 2, 1]               # Multi-resolution scales for affine registration
-  iterations: [400, 200, 100, 50]   # Iterations per scale (must match length of scales)
-  scale_dependent_lr: [0.003, 0.001, 0.0005, 0.0001]  # Learning rates per scale
-  loss_type: "mi"                    # One of: "mi", "cc", "dice"
-  patience: 30                       # Iterations without improvement)
-  min_delta: 1.0e-4                  # Minimum loss improvement to reset patience
+  scales: [16, 12, 10, 8, 6, 5, 4, 3, 2.5, 2, 1.5, 1]
+  iterations: [200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200]
+  scale_dependent_lr: [0.01, 0.008, 0.006, 0.005, 0.003, 0.002, 0.001, 0.0007, 0.0005, 0.0004, 0.0002, 0.0001]
+  loss_type: "mi"                   # One of: "mi", "cc", "dice", "mi_gradcc"
+  optimizer_type: "asgd"            # "adam" or "asgd" (Elastix-style Robbins-Monro schedule)
+  constrained_affine: false         # WSiReg-like: unconstrained affine
+  patience: 30                      # Base patience (scaled by pyramid level)
+  min_delta: 1.0e-4                 # Minimum loss improvement to reset patience
+  mi_num_samples: 15000             # Stratified spatial samples per MI evaluation
+  stage_mi_bins:                    # Per-stage MI histogram bins
+    rigid: 16
+    affine: 32
+  scale_mi_bins:                    # Per-scale MI histogram bins (overrides stage_mi_bins)
+    coarse: 10
+    mid: 20
+    fine: 48
+  scale_loss_schedule:              # Per-scale loss metric switching
+    coarse: "mi"
+    mid: "mi"
+    fine: "mi"
+  scale_dependent_patience: true    # Scale patience by pyramid level
+  center_mode: "none"               # "none" | "image" | "tissue" (elastix-like center-of-rotation)
+  required_valid_ratio: 0.05        # Guardrail against out-of-bounds divergence
+  invalid_sample_strategy: "lr_decay" # "none" | "lr_decay" | "early_stop"
+  invalid_lr_decay: 0.5
+  oob_penalty_weight: 0.0           # Optional: add penalty when coords leave [-1,1]
+  oob_penalty_adaptive: true
 
 diff:
-  scales: [6, 4, 2, 1]            # Multi-resolution scales for diffeomorphic registration
-  iterations: [400, 200, 100, 50]  # Iterations per scale (must match length of scales)
-  loss_type: "mi"                    # One of: "mi", "cc", "dice"
-  tolerance: 1.0e-4                  # Convergence slope threshold for early stopping
-  max_tolerance_iters: 30            # Sliding window size for convergence check
+  scales: [8, 6, 4, 3, 2, 1]         # Multi-resolution scales for diffeomorphic registration
+  iterations: [250, 200, 180, 150, 100, 60]  # Iterations per scale (must match length of scales)
+  loss_type: "mi_gradcc"              # One of: "mi", "cc", "mi_gradcc"
+  tolerance: 5.0e-4                   # Convergence slope threshold for early stopping
+  max_tolerance_iters: 80             # Sliding window size for convergence check
+  mask_weighted_loss: false           # Use tissue/valid mask for MI/LNCC where supported
+  regularization_weight: 0.05         # Weight for warp smoothness regularization
+
+bspline:
+  num_resolutions: 10
+  final_grid_spacing: 100
+  grid_spacing_schedule: [512, 392, 256, 128, 64, 32, 16, 4, 2, 1]
+  max_step_lengths: [100.0, 90.0, 70.0, 50.0, 40.0, 30.0, 20.0, 10.0, 1.0, 1.0]
+  max_iterations: 200
+  num_samples: 50000
+  num_histogram_bins: 32
+  bending_energy_weight: 0.0
+  tolerance: 5.0e-4
+  max_tolerance_iters: 80
+  required_valid_ratio: 0.2
+  invalid_sample_strategy: "lr_decay"
+  invalid_lr_decay: 0.5
+  oob_penalty_weight: 0.2
+  oob_penalty_adaptive: true
 
 registration:
-  register_type: "diff"              # Choose "affine" for affine-only or "diff" for full pipeline
+  register_type: "bspline"            # "affine", "diff", or "bspline"
+  wsireg_aligned_preset: true         # Enforce WSiReg-like defaults automatically

@@ -1,4 +1,5 @@
 import os
+import json
 
 import numpy as np
 import skimage.io as io
@@ -6,9 +7,11 @@ import torch
 import torch.nn.functional as F
 
 from src.affinemorph import AffineRegistration
+from src.bspline import BSplineRegistration
 from src.data_load import Image
 from src.diffeomorph import DiffRegistration
 from src.config import load_config
+from src.spatial_sync import sync_moving_scale_to_fixed
 from src.utils import save_registration_overlay, set_global_seed
 
 
@@ -36,6 +39,8 @@ class HiMReg:
         diff_iterations,
         affine_kwargs=None,
         diff_kwargs=None,
+        register_type="diff",
+        bspline_kwargs=None,
     ):
         self.fixed_images = fixed_images
         self.moving_images = moving_images
@@ -43,12 +48,14 @@ class HiMReg:
 
         affine_kwargs = dict(affine_kwargs or {})
         diff_kwargs = dict(diff_kwargs or {})
+        bspline_kwargs = dict(bspline_kwargs or {})
 
         patience = affine_kwargs.pop("patience", 50)
         min_delta = affine_kwargs.pop("min_delta", 1e-5)
-
-        tolerance = diff_kwargs.pop("tolerance", 1e-3)
-        max_tolerance_iters = diff_kwargs.pop("max_tolerance_iters", 1000)
+        self.diff_scales = list(diff_scales)
+        self.diff_iterations = list(diff_iterations)
+        self._diff_kwargs = diff_kwargs
+        self._bspline_kwargs = bspline_kwargs
 
         self.affine_registration = AffineRegistration(
             scales=affine_scales,
@@ -57,34 +64,46 @@ class HiMReg:
             moving_images=moving_images,
             patience=patience,
             min_delta=min_delta,
-            scale_dependent_lr=scale_dependent_lr,  # Scale-specific learning rates
+            scale_dependent_lr=scale_dependent_lr,
             **affine_kwargs,
         )
 
-        self.diff_registration = DiffRegistration(
-            scales=diff_scales,
-            iterations=diff_iterations,
-            fixed_images=fixed_images,
-            moving_images=moving_images,
-            tolerance=tolerance,
-            max_tolerance_iters=max_tolerance_iters,
-            **diff_kwargs,
-        )
+        self._register_type_hint = register_type
+
+    def _build_nonlinear_registration(self, register_type: str, init_affine: torch.Tensor):
+        if register_type == "bspline":
+            return BSplineRegistration(
+                fixed_images=self.fixed_images,
+                moving_images=self.moving_images,
+                init_affine=init_affine,
+                **self._bspline_kwargs,
+            )
+        if register_type == "diff":
+            return DiffRegistration(
+                scales=self.diff_scales,
+                iterations=self.diff_iterations,
+                fixed_images=self.fixed_images,
+                moving_images=self.moving_images,
+                init_affine=init_affine,
+                **self._diff_kwargs,
+            )
+        raise ValueError(f"Unsupported nonlinear register_type: {register_type}")
 
     def register(self, register_type="affine", save_transformed=True):
         """
         Perform registration of the moving image to the fixed image.
 
         Args:
-            register_type (str): Type of registration to perform ("affine" or "diff").
+            register_type (str): Type of registration ("affine", "diff", or "bspline").
                                  "affine" performs only affine registration.
                                  "diff" performs affine followed by diffeomorphic registration.
+                                 "bspline" performs affine followed by B-spline registration.
 
             save_transformed (bool): Whether to save transformed images during optimization.
 
         Returns:
-            tuple: (affine_transformed, diff_transformed, final_coordinates)
-                  If register_type='affine': diff_transformed will be None.
+            tuple: (affine_transformed, nonlinear_transformed, final_coordinates)
+                  If register_type='affine': nonlinear_transformed will be None.
         """
 
         # Affine registration
@@ -100,26 +119,25 @@ class HiMReg:
             affine_transformed = self._upsample_transformed_images(affine_transformed, original_size)
             return affine_transformed, None, affine_coords
 
-        # Diffeomorphic registration
-        affine_result = affine_transformed[-1].squeeze().detach().cpu().numpy()
-        self.diff_registration.moving_images = Image(affine_result, device=self.device)
-        self.diff_registration.init_affine = affine_matrix
-        diff_transformed = self.diff_registration.optimize(save_transformed=save_transformed)
-        final_coordinates = self.diff_registration.get_final_coordinates()
+        # Nonlinear registration (diff or bspline), chained from affine init.
+        fixed_p2t = self.fixed_images.get_physical_to_pixel()
+        moving_t2p = self.moving_images.get_pixel_to_physical()
+        affine_init_phys = torch.matmul(moving_t2p, torch.matmul(affine_matrix, fixed_p2t))
+        nl_reg = self._build_nonlinear_registration(register_type, init_affine=affine_init_phys.detach())
+        nl_transformed = nl_reg.optimize(save_transformed=save_transformed)
+        final_coordinates = nl_reg.get_final_coordinates()
         if final_coordinates is not None:
             current_size = final_coordinates.shape[1:-1]
             if current_size != original_size:
                 final_coordinates = F.interpolate(
-                    final_coordinates.permute(0, 3, 1, 2),  # [B, H, W, 2] -> [B, 2, H, W]
+                    final_coordinates.permute(0, 3, 1, 2),
                     size=original_size,
                     mode="bilinear",
                     align_corners=True,
-                ).permute(
-                    0, 2, 3, 1
-                )  # [B, 2, H, W] -> [B, H, W, 2]
+                ).permute(0, 2, 3, 1)
 
-            diff_transformed = self._upsample_transformed_images(diff_transformed, original_size)
-        return affine_transformed, diff_transformed, final_coordinates
+            nl_transformed = self._upsample_transformed_images(nl_transformed, original_size)
+        return affine_transformed, nl_transformed, final_coordinates
 
     def _upsample_transformed_images(self, transformed_images, target_size):
         """Helper method to upsample transformed images to target size."""
@@ -155,19 +173,43 @@ def main(config_path: str = "config.yaml"):
     config_manager = load_config(config_path)
     affine_cfg = config_manager.affine_config
     diff_cfg = config_manager.diff_config
+    prepro_cfg = config_manager.preprocessing_config
 
     # Ensure reproducibility
     set_global_seed(config_manager.seed, config_manager.deterministic)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    io_cfg = config_manager.config.get("io", {})
+    device_str = io_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device_str)
     print(f"Using device: {device}")
 
     # Load images
     try:
-        fixed_image = Image.load_file(config_manager.fixed_image_path, device=device)
-        moving_image = Image.load_file(config_manager.moving_image_path, device=device)
+        fixed_image = Image.load_file(
+            config_manager.fixed_image_path,
+            device=device,
+            preprocessing=prepro_cfg.get("fixed", {}),
+        )
+        moving_image_raw = Image.load_file(
+            config_manager.moving_image_path,
+            device=device,
+            preprocessing=prepro_cfg.get("moving", {}),
+        )
+        scale_sync_cfg = config_manager.scale_sync_config
+        moving_sitk_synced, scale_sync_meta = sync_moving_scale_to_fixed(
+            moving_sitk=moving_image_raw.images[0].itk_image,
+            fixed_sitk=fixed_image.images[0].itk_image,
+            enabled=bool(scale_sync_cfg.get("enabled", True)),
+            mode=str(scale_sync_cfg.get("mode", "isotropic_fit")),
+        )
+        moving_image = Image(moving_sitk_synced, device=device, preprocessing={})
         print(f"Loaded fixed image: {config_manager.fixed_image_path}")
         print(f"Loaded moving image: {config_manager.moving_image_path}")
+        print(
+            f"Applied scale-sync: enabled={bool(scale_sync_cfg.get('enabled', True))}, "
+            f"mode={str(scale_sync_cfg.get('mode', 'isotropic_fit'))}, "
+            f"isotropic_scale={scale_sync_meta.get('isotropic_scale', 1.0):.4f}"
+        )
     except Exception as exc:
         print(f"Error loading images: {exc}")
         return
@@ -183,6 +225,8 @@ def main(config_path: str = "config.yaml"):
         diff_iterations=diff_cfg["iterations"],
         affine_kwargs=config_manager.get_affine_kwargs(),
         diff_kwargs=config_manager.get_diff_kwargs(),
+        register_type=config_manager.register_type,
+        bspline_kwargs=config_manager.get_bspline_kwargs(),
     )
 
     # Perform registration
@@ -199,6 +243,8 @@ def main(config_path: str = "config.yaml"):
     os.makedirs(output_dir, exist_ok=True)
 
     # Save results
+    reg_type = config_manager.register_type
+
     if affine_transformed:
         affine_pred_path = os.path.join(output_dir, f"{moving_basename}_affine.tif")
         last_affine_image = affine_transformed[-1].squeeze().detach().cpu().numpy()
@@ -206,16 +252,31 @@ def main(config_path: str = "config.yaml"):
         print(f"Saved affine result: {affine_pred_path}")
 
     if diff_transformed:
-        diff_pred_path = os.path.join(output_dir, f"{moving_basename}_diff.tif")
-        last_diff_image = diff_transformed[-1].squeeze().detach().cpu().numpy()
-        io.imsave(diff_pred_path, last_diff_image)
-        print(f"Saved diffeomorphic result: {diff_pred_path}")
+        nl_pred_path = os.path.join(output_dir, f"{moving_basename}_{reg_type}.tif")
+        last_nl_image = diff_transformed[-1].squeeze().detach().cpu().numpy()
+        io.imsave(nl_pred_path, last_nl_image)
+        print(f"Saved {reg_type} result: {nl_pred_path}")
 
     if final_coordinates is not None:
         coords_pred_path = os.path.join(output_dir, f"{moving_basename}_coords.npy")
         final_coords_np = final_coordinates.detach().cpu().numpy()
         np.save(coords_pred_path, final_coords_np)
         print(f"Saved coordinates: {coords_pred_path}")
+        coords_meta_path = os.path.join(output_dir, f"{moving_basename}_coords_meta.json")
+        with open(coords_meta_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "moving_image_original": config_manager.moving_image_path,
+                    "moving_preprocessing": prepro_cfg.get("moving", {}),
+                    "fixed_preprocessing": prepro_cfg.get("fixed", {}),
+                    "scale_sync": scale_sync_meta,
+                    "coords_reference": "fixed-grid output -> preprocessed+scale-synced moving input",
+                },
+                f,
+                indent=2,
+                ensure_ascii=True,
+            )
+        print(f"Saved coordinates metadata: {coords_meta_path}")
 
     # Save before/after overlay comparison
     fixed_tensor = fixed_image()
@@ -244,7 +305,7 @@ def main(config_path: str = "config.yaml"):
                 align_corners=True,
             )
 
-        overlay_path = os.path.join(output_dir, f"{moving_basename}_diff_overlay.png")
+        overlay_path = os.path.join(output_dir, f"{moving_basename}_{reg_type}_overlay.png")
 
         save_registration_overlay(
             fixed_image=fixed_tensor,
@@ -258,4 +319,9 @@ def main(config_path: str = "config.yaml"):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse as _ap
+
+    _parser = _ap.ArgumentParser(description="HiMReg image registration")
+    _parser.add_argument("--config", type=str, default="config.yaml", help="Path to config YAML")
+    _args = _parser.parse_args()
+    main(config_path=_args.config)
