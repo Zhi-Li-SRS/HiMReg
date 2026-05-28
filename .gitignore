@@ -7,3 +7,5 @@ __pycache__
 external/
 match_anything_affine.py
 Intensity_distribution/
+scripts/
+comparison_results/

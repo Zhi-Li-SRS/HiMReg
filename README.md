@@ -71,27 +71,28 @@ Requires Python 3.8+ and a CUDA-capable GPU (CPU fallback supported but slow for
 
 ## Quick Start
 
-Each script has editable settings at the top — open the `.sh` file, change the paths/options, then run it directly.
+All entry points are configured via `config.yaml` or command-line flags.
 
 ### 1. Register a pair of images
 
-Open `scripts/run_register.sh` and edit the paths:
+Edit the `io` section of `config.yaml`:
 
-```bash
-# ── User Settings (edit these) ──
-FIXED="data/maldi/he_rescale.tif"       # Path to fixed/reference image
-MOVING="data/maldi/redox_rescale.tif"   # Path to moving image to align
-OUTPUT="pred"                            # Output directory
-MODE="bspline"                           # affine | diff | bspline
+```yaml
+io:
+  fixed: "data/maldi/he_rescale.tif"     # Path to fixed/reference image
+  moving: "data/maldi/redox_rescale.tif" # Path to moving image to align
+  output: "pred"                          # Output directory
+  device: "cuda"                          # cuda | cpu
+
+registration:
+  register_type: "bspline"                # affine | diff | bspline
 ```
 
 Then run:
 
 ```bash
-bash scripts/run_register.sh
+python HiMReg.py --config config.yaml
 ```
-
-Alternatively, edit `config.yaml` directly and run `python HiMReg.py`.
 
 **Outputs** (saved to `pred/`):
 | File | Description |
@@ -103,59 +104,33 @@ Alternatively, edit `config.yaml` directly and run `python HiMReg.py`.
 
 ### 2. Apply a saved transform to new images
 
-Open `scripts/run_apply_transform.sh` and edit:
-
 ```bash
-COORDS="pred/maldi/redox_rescale_coords.npy"   # Saved deformation grid
-IMAGES="data/maldi/redox_rescale.tif"           # Images to warp (space-separated)
+python apply_transform.py \
+    --coords pred/maldi/redox_rescale_coords.npy \
+    --images data/maldi/redox_rescale.tif
 ```
 
-Then run:
-
-```bash
-bash scripts/run_apply_transform.sh
-```
+`--images` accepts multiple space-separated paths. Omit `--output` to auto-name results as `<image>_warped.tif`.
 
 ### 3. Benchmark against Elastix/SimpleITK
 
-Open `scripts/run_benchmark.sh` and edit:
-
 ```bash
-BENCHMARK_DIR="review_response_data/benchmark"   # Directory with roi{N}/ subdirs
-ROI_IDS="2,3,4,5"                                # Which ROIs to include
-HIMREG_MODE="bspline"                            # affine | diff | bspline
-OUTPUT="comparison_results/benchmark_latest"
+python src/compare.py \
+    --benchmark-dir benchmark \
+    --roi-ids 2,3,4,5 \
+    --fixed-suffix he \
+    --moving-suffix 791 \
+    --himreg-mode bspline \
+    --output comparison_results/benchmark_latest \
+    --device cuda
 ```
 
-Then run:
-
-```bash
-bash scripts/run_benchmark.sh
-```
-
-This runs both methods on each ROI and produces:
+This runs both methods on each ROI (expects `roi{N}/` subdirectories) and produces:
 - Per-case metrics CSV (`metrics_all_cases.csv`)
 - Summary statistics (`metrics_summary.csv`)
 - Overlay visualizations per ROI
 
-### 4. Generate publication figures
-
-Open `scripts/run_figures.sh` and edit:
-
-```bash
-RESULTS_DIR="comparison_results/benchmark_latest"
-ROI_IDS="roi2,roi3,roi4,roi5"
-```
-
-Then run:
-
-```bash
-bash scripts/run_figures.sh
-```
-
-Produces:
-- Individual overlay PNGs per ROI (H&E, SRS, Before/HiMReg/Elastix overlays)
-- Metrics bar chart as SVG (8 metrics, 2x4 layout)
+Run `python src/compare.py --help` for the full set of affine/B-spline tuning flags.
 
 ## Configuration
 
@@ -222,13 +197,6 @@ src/
   preprocess.py             # Tissue masking, normalization, gradient magnitude
   utils.py                  # Gaussian blur, downsampling, visualization helpers
   compare.py                # Benchmark: HiMReg vs SimpleITK/Elastix with metrics
-
-scripts/
-  run_register.sh           # Quick registration wrapper
-  run_benchmark.sh          # Multi-ROI benchmark wrapper
-  run_figures.sh            # Publication figure generation
-  run_apply_transform.sh    # Transform application wrapper
-  make_figures.py           # Figure generation (overlays + metrics chart)
 ```
 
 ## Metrics
