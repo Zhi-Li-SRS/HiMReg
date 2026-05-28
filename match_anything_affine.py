@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -13,6 +14,20 @@ from src.utils import save_registration_overlay
 
 
 MODEL_ID = "zju-community/matchanything_eloftr"
+
+_MODEL_CACHE: Dict[Tuple[str, str], Tuple[AutoImageProcessor, AutoModelForKeypointMatching]] = {}
+
+
+def get_matchanything_model(
+    device: torch.device, model_id: str = MODEL_ID
+) -> Tuple[AutoImageProcessor, AutoModelForKeypointMatching]:
+    """Load (and cache) the MatchAnything-ELoFTR processor + model on `device`."""
+    key = (model_id, str(device))
+    if key not in _MODEL_CACHE:
+        processor = AutoImageProcessor.from_pretrained(model_id, use_fast=False)
+        model = AutoModelForKeypointMatching.from_pretrained(model_id).to(device).eval()
+        _MODEL_CACHE[key] = (processor, model)
+    return _MODEL_CACHE[key]
 
 
 def _normalize_to_uint8(array: np.ndarray) -> np.ndarray:
@@ -28,7 +43,7 @@ def _normalize_to_uint8(array: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(arr * 255.0), 0, 255).astype(np.uint8)
 
 
-def _array_to_pil(image_array: np.ndarray) -> Image.Image:
+def array_to_pil(image_array: np.ndarray) -> Image.Image:
     array = np.asarray(image_array)
     if array.ndim == 0:
         raise ValueError("The image is empty")
@@ -39,7 +54,7 @@ def _array_to_pil(image_array: np.ndarray) -> Image.Image:
             array = np.moveaxis(array, 0, -1)
         elif array.shape[-1] not in {1, 3, 4}:
             array = array[0]
-            return _array_to_pil(array)
+            return array_to_pil(array)
     array = _normalize_to_uint8(array)
     if array.ndim == 2:
         return Image.fromarray(array, mode="L").convert("RGB")
@@ -50,6 +65,9 @@ def _array_to_pil(image_array: np.ndarray) -> Image.Image:
         if channels >= 3:
             return Image.fromarray(array[..., :3], mode="RGB")
     raise ValueError(f"Unparsable image shape: {array.shape}")
+
+
+_array_to_pil = array_to_pil  # backward-compat alias
 
 
 def _load_image(path: Path) -> Tuple[Image.Image, np.ndarray]:
@@ -190,9 +208,10 @@ def _estimate_affine(
     ransac_threshold: float,
     ransac_confidence: float,
 ):
+    """Full 6-DoF RANSAC affine, matching the MatchAnything official `ransac_affine` default."""
     if keypoints_fixed.shape[0] < 3:
         raise RuntimeError("Affine estimation needs at least 3 correspondences")
-    matrix, inliers = cv2.estimateAffinePartial2D(
+    matrix, inliers = cv2.estimateAffine2D(
         keypoints_moving.astype(np.float32),
         keypoints_fixed.astype(np.float32),
         method=cv2.RANSAC,
@@ -201,7 +220,7 @@ def _estimate_affine(
         maxIters=5000,
     )
     if matrix is None or inliers is None:
-        raise RuntimeError("cv2.estimateAffinePartial2D failed to find a valid transform")
+        raise RuntimeError("cv2.estimateAffine2D failed to find a valid transform")
     if inliers.sum() < 3:
         raise RuntimeError("Too few inliers for affine transform")
     return matrix.astype(np.float32), inliers.astype(bool).ravel()
@@ -219,6 +238,66 @@ def _warp_rgb_preview(moving_img: Image.Image, matrix: np.ndarray, width: int, h
     )
 
 
+def register_pair_matchanything(
+    fixed_array: np.ndarray,
+    moving_array: np.ndarray,
+    *,
+    device: torch.device,
+    model_id: str = MODEL_ID,
+    match_threshold: float = 0.1,
+    ransac_threshold: float = 3.0,
+    ransac_confidence: float = 0.999,
+    sample_target_k: int = 6000,
+) -> Dict[str, Any]:
+    """Register `moving_array` onto `fixed_array` with MatchAnything-ELoFTR + RANSAC affine.
+
+    This mirrors the authors' official `ransac_affine` post-processing default
+    (full 6-DoF affine, RANSAC threshold 3.0 px, match threshold 0.1).
+
+    Returns a dict with `warped`, `affine_matrix`, `runtime_s`, `n_matches`, `n_inliers`.
+    The `warped` array is on the fixed grid, with leading channels (if any) preserved
+    from `moving_array`.
+    """
+    processor, model = get_matchanything_model(device, model_id)
+
+    fixed_pil = array_to_pil(fixed_array)
+    moving_pil = array_to_pil(moving_array)
+    H, W = fixed_pil.height, fixed_pil.width
+
+    start = time.time()
+    kf, km, scores = _compute_matches_from_outputs(
+        processor, model, fixed_pil, moving_pil, device, match_threshold
+    )
+    if kf.shape[0] < 3:
+        raise RuntimeError(f"Too few matches after thresholding: {kf.shape[0]}")
+
+    kf_sel, km_sel, sc_sel = select_spatially_diverse(
+        kf, km, scores, img_hw=(H, W), target_k=sample_target_k, grid=8, per_cell_cap=192
+    )
+    matrix, inlier_mask = _estimate_affine(kf_sel, km_sel, ransac_threshold, ransac_confidence)
+
+    moving_prepared, moving_meta = _prepare_array_for_warp(moving_array)
+    warped_prepared = _warp_array_affine(moving_prepared, matrix, W, H)
+    warped = _restore_array_from_warp(warped_prepared, moving_meta)
+    runtime_s = time.time() - start
+
+    return {
+        "warped": warped,
+        "affine_matrix": matrix,
+        "runtime_s": float(runtime_s),
+        "n_matches_all": int(kf.shape[0]),
+        "n_matches_used": int(kf_sel.shape[0]),
+        "n_inliers": int(inlier_mask.sum()),
+        "mean_inlier_score": float(sc_sel[inlier_mask].mean()) if inlier_mask.any() else 0.0,
+        "keypoints_fixed_inliers": kf_sel[inlier_mask],
+        "keypoints_moving_inliers": km_sel[inlier_mask],
+        "keypoints_fixed": kf_sel,
+        "keypoints_moving": km_sel,
+        "matching_scores": sc_sel,
+        "inlier_mask": inlier_mask,
+    }
+
+
 def run_registration_affine(
     fixed_path: Path,
     moving_path: Path,
@@ -230,38 +309,35 @@ def run_registration_affine(
     sample_target_k: int,
 ):
     device = torch.device(device_str)
-    processor = AutoImageProcessor.from_pretrained(MODEL_ID, use_fast=False)
-    model = AutoModelForKeypointMatching.from_pretrained(MODEL_ID).to(device).eval()
 
     fixed_img, fixed_raw = _load_image(fixed_path)
     moving_img, moving_raw = _load_image(moving_path)
-
     H, W = fixed_img.height, fixed_img.width
 
-    kf, km, scores = _compute_matches_from_outputs(
-        processor, model, fixed_img, moving_img, device, match_threshold
+    result = register_pair_matchanything(
+        fixed_array=fixed_raw,
+        moving_array=moving_raw,
+        device=device,
+        match_threshold=match_threshold,
+        ransac_threshold=ransac_threshold,
+        ransac_confidence=ransac_confidence,
+        sample_target_k=sample_target_k,
     )
-    if kf.shape[0] < 3:
-        raise RuntimeError(f"Too few matches after thresholding: {kf.shape[0]}")
-
-    kf_sel, km_sel, sc_sel = select_spatially_diverse(
-        kf, km, scores, img_hw=(H, W), target_k=sample_target_k, grid=8, per_cell_cap=192
-    )
-
-    matrix, inlier_mask = _estimate_affine(kf_sel, km_sel, ransac_threshold, ransac_confidence)
+    matrix = result["affine_matrix"]
+    inlier_mask = result["inlier_mask"]
+    kf_sel = result["keypoints_fixed"]
+    km_sel = result["keypoints_moving"]
+    sc_sel = result["matching_scores"]
+    warped_raw = result["warped"]
 
     warped_rgb = _warp_rgb_preview(moving_img, matrix, W, H)
-
-    moving_prepared, moving_meta = _prepare_array_for_warp(moving_raw)
-    warped_prepared = _warp_array_affine(moving_prepared, matrix, W, H)
-    warped_raw = _restore_array_from_warp(warped_prepared, moving_meta)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     warped_path = output_dir / "moving_transformed_affine.tiff"
     tifffile.imwrite(warped_path, warped_raw)
 
-    keypoints_fixed_inliers = kf_sel[inlier_mask]
-    keypoints_moving_inliers = km_sel[inlier_mask]
+    keypoints_fixed_inliers = result["keypoints_fixed_inliers"]
+    keypoints_moving_inliers = result["keypoints_moving_inliers"]
     scores_inliers = sc_sel[inlier_mask]
 
     transform_npz_path = output_dir / "transform_affine_data.npz"
@@ -298,10 +374,11 @@ def run_registration_affine(
         "match_threshold": match_threshold,
         "ransac_threshold": ransac_threshold,
         "ransac_confidence": ransac_confidence,
-        "num_matches_all": int(kf.shape[0]),
-        "num_matches_used": int(kf_sel.shape[0]),
-        "num_inliers": int(inlier_mask.sum()),
-        "mean_inlier_score": float(scores_inliers.mean()) if scores_inliers.size else 0.0,
+        "num_matches_all": int(result["n_matches_all"]),
+        "num_matches_used": int(result["n_matches_used"]),
+        "num_inliers": int(result["n_inliers"]),
+        "mean_inlier_score": float(result["mean_inlier_score"]),
+        "runtime_s": float(result["runtime_s"]),
         "affine_matrix": matrix.tolist(),
         "output_files": {
             "warped_tiff": str(warped_path),
@@ -348,7 +425,10 @@ def parse_args() -> argparse.Namespace:
         help="Inference device: cpu | cuda (default: auto)",
     )
     parser.add_argument(
-        "--match-threshold", type=float, default=0.2, help="ELoFTR matching confidence threshold"
+        "--match-threshold",
+        type=float,
+        default=0.1,
+        help="ELoFTR matching confidence threshold (MatchAnything paper default: 0.1)",
     )
     parser.add_argument(
         "--ransac-threshold", type=float, default=3.0, help="RANSAC reprojection threshold (pixels)"
