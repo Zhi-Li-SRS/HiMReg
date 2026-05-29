@@ -1,4 +1,6 @@
 cff-version: 1.2.0
+message: "If you use HiMReg in your research, please cite it as below."
+title: "HiMReg: Hierarchical Multimodal Image Registration"
 abstract: "A GPU-accelerated hierarchical coarse-to-fine framework for cross-modal biomedical image registration (H&E histology, SRS microscopy, fluorescence, MALDI mass spectrometry imaging)."
 type: software
 authors:
